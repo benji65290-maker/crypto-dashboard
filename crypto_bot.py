@@ -28,42 +28,30 @@ except Exception as e:
     raise SystemExit()
 
 # ======================================================
-# ⚙️ Fonctions CoinGecko
+# ⚙️ Fonctions CoinPaprika (plus tolérante que CoinGecko)
 # ======================================================
-def get_price_history(symbol_id, retry=0):
-    """Récupère les prix horaires récents sur CoinGecko avec gestion du rate limit"""
+def get_price_history(symbol_id):
+    """Récupère les prix horaires récents sur CoinPaprika"""
     try:
-        url = f"https://api.coingecko.com/api/v3/coins/{symbol_id}/market_chart"
-        params = {"vs_currency": "usd", "days": 2, "interval": "hourly"}
-        headers = {"User-Agent": "CryptoBot/1.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=15)
+        url = f"https://api.coinpaprika.com/v1/tickers/{symbol_id}/historical"
+        params = {
+            "start": (pd.Timestamp.utcnow() - pd.Timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "interval": "1h",
+            "limit": 48
+        }
+        r = requests.get(url, params=params, timeout=15)
         print(f"🌐 [{symbol_id}] Status {r.status_code}", flush=True)
-
-        # Gestion du rate limit (HTTP 429)
-        if r.status_code == 429:
-            if retry < 3:
-                wait_time = (retry + 1) * 10
-                print(f"⏳ Rate limit CoinGecko — attente {wait_time}s avant retry...", flush=True)
-                time.sleep(wait_time)
-                return get_price_history(symbol_id, retry + 1)
-            else:
-                print(f"❌ Abandon {symbol_id} après plusieurs tentatives.", flush=True)
-                return None
-
         if r.status_code != 200:
             print(f"⚠️ Erreur HTTP {r.status_code} pour {symbol_id}", flush=True)
             return None
-
-        data = r.json().get("prices", [])
+        data = r.json()
         if not data:
             print(f"⚠️ Pas de data pour {symbol_id}", flush=True)
             return None
-
-        df = pd.DataFrame(data, columns=["timestamp", "close"])
-        df["close"] = df["close"].astype(float)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        return df
-
+        df = pd.DataFrame(data)
+        df.rename(columns={"price": "close", "timestamp": "timestamp"}, inplace=True)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        return df[["timestamp", "close"]]
     except Exception as e:
         print(f"⚠️ Erreur get_price_history({symbol_id}): {e}", flush=True)
         return None
@@ -99,16 +87,16 @@ def update_sheet():
             ws = sh.add_worksheet(title="MarketData", rows="100", cols="10")
 
         cryptos = {
-            "bitcoin": "BTC",
-            "ethereum": "ETH",
-            "solana": "SOL",
-            "binancecoin": "BNB",
-            "cardano": "ADA",
-            "dogecoin": "DOGE",
-            "avalanche-2": "AVAX",
-            "ripple": "XRP",
-            "chainlink": "LINK",
-            "matic-network": "MATIC"
+            "btc-bitcoin": "BTC",
+            "eth-ethereum": "ETH",
+            "sol-solana": "SOL",
+            "bnb-binance-coin": "BNB",
+            "ada-cardano": "ADA",
+            "doge-dogecoin": "DOGE",
+            "avax-avalanche": "AVAX",
+            "xrp-xrp": "XRP",
+            "link-chainlink": "LINK",
+            "matic-polygon": "MATIC"
         }
 
         rows = []
@@ -121,7 +109,7 @@ def update_sheet():
             price = df["close"].iloc[-1]
             rows.append([short, round(price, 3), round(rsi.iloc[-1], 2), signal])
             print(f"✅ {short} → {price}$ | RSI {round(rsi.iloc[-1], 2)} | {signal}", flush=True)
-            time.sleep(2)  # petite pause entre les cryptos pour éviter le 429
+            time.sleep(1)  # petite pause pour politesse API
 
         if not rows:
             print("⚠️ Aucune donnée récupérée.", flush=True)
@@ -161,7 +149,7 @@ def keep_alive():
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto bot actif via CoinGecko et Google Sheets."
+    return "✅ Crypto bot actif via CoinPaprika et Google Sheets."
 
 @app.route("/run")
 def manual_run():
