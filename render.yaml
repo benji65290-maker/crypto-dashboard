@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: crypto-dashboard
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python crypto_dashboard.py"
