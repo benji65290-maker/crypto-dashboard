@@ -34,11 +34,20 @@ def get_price_history(symbol_id):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{symbol_id}/market_chart"
         params = {"vs_currency": "usd", "days": 2, "interval": "hourly"}
-        r = requests.get(url, params=params, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; CryptoBot/1.0; +https://render.com)"}
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+
+        # Log détaillé pour diagnostic
+        print(f"🌐 [{symbol_id}] Status {r.status_code}")
+        if r.status_code != 200:
+            print(f"⚠️ Erreur API CoinGecko: {r.text[:200]}")
+            return None
+
         data = r.json().get("prices", [])
         if not data:
-            print(f"⚠️ Pas de data pour {symbol_id}")
+            print(f"⚠️ Pas de data pour {symbol_id} (réponse vide)")
             return None
+
         df = pd.DataFrame(data, columns=["timestamp", "close"])
         df["close"] = df["close"].astype(float)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -93,6 +102,7 @@ def update_sheet():
         for symbol_id, short in cryptos.items():
             df = get_price_history(symbol_id)
             if df is None or df.empty:
+                print(f"⚠️ {short} ignoré (aucune donnée)")
                 continue
             rsi = compute_RSI(df["close"])
             signal = signal_RSI(rsi)
@@ -119,7 +129,7 @@ def run_bot():
     print("🚀 Démarrage de la mise à jour des données crypto (CoinGecko)...")
     while True:
         update_sheet()
-        time.sleep(3600)  # toutes les heures
+        time.sleep(3600)
 
 def keep_alive():
     url = os.getenv("RENDER_EXTERNAL_URL", "https://crypto-dashboard-8tn8.onrender.com")
@@ -129,7 +139,7 @@ def keep_alive():
             print("💤 Ping keep-alive envoyé à Render.")
         except Exception as e:
             print(f"⚠️ Erreur keep_alive : {e}")
-        time.sleep(600)  # toutes les 10 min
+        time.sleep(600)
 
 # ======================================================
 # 🌐 Flask route
