@@ -15,44 +15,38 @@ app = Flask(__name__)
 # ======================================================
 # 🔐 Authentification Google Sheets
 # ======================================================
-print("🔐 Initialisation des credentials Google...")
+print("🔐 Initialisation des credentials Google...", flush=True)
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     gc = gspread.authorize(creds)
     SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+    print("✅ Credentials Google OK", flush=True)
 except Exception as e:
-    print(f"❌ Erreur credentials Google : {e}")
+    print(f"❌ Erreur credentials Google : {e}", flush=True)
     raise SystemExit()
 
 # ======================================================
-# ⚙️ Fonctions de marché (CoinGecko)
+# ⚙️ Fonctions CoinGecko
 # ======================================================
 def get_price_history(symbol_id):
-    """Récupère les prix horaires récents sur CoinGecko"""
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{symbol_id}/market_chart"
         params = {"vs_currency": "usd", "days": 2, "interval": "hourly"}
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; CryptoBot/1.0; +https://render.com)"}
+        headers = {"User-Agent": "CryptoBot/1.0"}
         r = requests.get(url, params=params, headers=headers, timeout=15)
-
-        print(f"🌐 [{symbol_id}] Status {r.status_code}")
-        if r.status_code != 200:
-            print(f"⚠️ Erreur API CoinGecko: {r.text[:200]}")
-            return None
-
+        print(f"🌐 [{symbol_id}] Status {r.status_code}", flush=True)
         data = r.json().get("prices", [])
         if not data:
-            print(f"⚠️ Pas de data pour {symbol_id}")
+            print(f"⚠️ Pas de data pour {symbol_id}", flush=True)
             return None
-
         df = pd.DataFrame(data, columns=["timestamp", "close"])
         df["close"] = df["close"].astype(float)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         return df
     except Exception as e:
-        print(f"⚠️ Erreur get_price_history({symbol_id}): {e}")
+        print(f"⚠️ Erreur get_price_history({symbol_id}): {e}", flush=True)
         return None
 
 def compute_RSI(series, period=14):
@@ -77,6 +71,7 @@ def signal_RSI(rsi):
 # 📊 Mise à jour Google Sheets
 # ======================================================
 def update_sheet():
+    print("🧠 [DEBUG] Début update_sheet()", flush=True)
     try:
         sh = gc.open_by_key(SHEET_ID)
         try:
@@ -101,33 +96,33 @@ def update_sheet():
         for symbol_id, short in cryptos.items():
             df = get_price_history(symbol_id)
             if df is None or df.empty:
-                print(f"⚠️ {short} ignoré (aucune donnée)")
                 continue
             rsi = compute_RSI(df["close"])
             signal = signal_RSI(rsi)
             price = df["close"].iloc[-1]
             rows.append([short, round(price, 3), round(rsi.iloc[-1], 2), signal])
-            print(f"✅ {short} → {price}$ | RSI {round(rsi.iloc[-1], 2)} | {signal}")
+            print(f"✅ {short} → {price}$ | RSI {round(rsi.iloc[-1], 2)} | {signal}", flush=True)
 
         if not rows:
-            print("⚠️ Aucune donnée récupérée, aucune ligne écrite.")
+            print("⚠️ Aucune donnée récupérée.", flush=True)
             return
 
         df_out = pd.DataFrame(rows, columns=["Crypto", "Dernier Prix", "RSI", "Signal"])
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print(f"✅ Feuille mise à jour à {time.strftime('%H:%M:%S')}.")
+        print(f"✅ Feuille mise à jour à {time.strftime('%H:%M:%S')}.", flush=True)
 
     except Exception as e:
-        print(f"❌ Erreur update_sheet() : {e}")
+        print(f"❌ Erreur update_sheet() : {e}", flush=True)
 
 # ======================================================
-# 🔁 Boucle principale + Keep alive
+# 🔁 Threads
 # ======================================================
 def run_bot():
-    print("🚀 Démarrage de la mise à jour des données crypto (CoinGecko)...")
-    update_sheet()  # 💥 Lancement immédiat
+    print("🚀 Lancement du bot principal", flush=True)
+    update_sheet()  # première mise à jour immédiate
     while True:
+        print("⏳ Attente avant prochaine mise à jour (1h)...", flush=True)
         time.sleep(3600)
         update_sheet()
 
@@ -136,17 +131,22 @@ def keep_alive():
     while True:
         try:
             requests.get(url, timeout=10)
-            print("💤 Ping keep-alive envoyé à Render.")
+            print("💤 Ping keep-alive envoyé.", flush=True)
         except Exception as e:
-            print(f"⚠️ Erreur keep_alive : {e}")
+            print(f"⚠️ Erreur keep_alive : {e}", flush=True)
         time.sleep(600)
 
 # ======================================================
-# 🌐 Flask route
+# 🌐 Flask routes
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto bot actif via CoinGecko et connecté à Google Sheets."
+    return "✅ Crypto bot actif via CoinGecko et Google Sheets."
+
+@app.route("/run")
+def manual_run():
+    threading.Thread(target=update_sheet, daemon=True).start()
+    return "🧠 Mise à jour manuelle lancée !"
 
 # ======================================================
 # 🧠 Lancement
