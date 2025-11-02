@@ -2,22 +2,31 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
 import pandas as pd
+import os
+import json
 
-# ID de ton Google Sheet (copie-le depuis l’URL)
-GOOGLE_SHEET_ID = "1KSc4xYb3m6X4PYozcctMNYJ89A8a0Z8scIg8MPBsXJc"  # ex: 1AbCdEFG123456789xyz
-
-# Fichier de clé JSON (même dossier que ton script)
-SERVICE_ACCOUNT_FILE = "service_account.json"
-
-# Portée d’autorisation
+# ======================================================
+# 🔐 Gestion des credentials Google via variable Render
+# ======================================================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+# Lecture du JSON depuis la variable d'environnement Render
+if os.getenv("GOOGLE_SERVICE_JSON"):
+    info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+else:
+    raise Exception("❌ GOOGLE_SERVICE_JSON non défini dans les variables d'environnement.")
+
+gc = gspread.authorize(creds)
+
+# ID du Google Sheet récupéré depuis les variables Render 
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+
 def open_sheet():
-    """Ouvre le Google Sheet via service account."""
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(GOOGLE_SHEET_ID)
-    return sh
+    """Ouvre le Google Sheet via l'ID fourni."""
+    if not GOOGLE_SHEET_ID:
+        raise Exception("❌ GOOGLE_SHEET_ID non défini dans les variables d'environnement.")
+    return gc.open_by_key(GOOGLE_SHEET_ID)
 
 def write_df_to_worksheet(df, worksheet_name, clear=True):
     """Écrit un DataFrame dans un onglet du Google Sheet."""
@@ -30,12 +39,14 @@ def write_df_to_worksheet(df, worksheet_name, clear=True):
         ws.clear()
     set_with_dataframe(ws, df, include_index=False, include_column_header=True)
 
+# ======================================================
+# 📊 Exemple de test : Écrit un tableau simple dans le Sheet google 
+# ======================================================
 if __name__ == "__main__":
-    # Exemple de test : écrire un petit tableau
     df = pd.DataFrame({
         "Crypto": ["BTCUSDC", "SOLUSDC", "ETHUSDC"],
-        "Prix": [69500, 197.8, 3850],
-        "RSI": [56, 62, 58]
+        "Prix": [69500, 197, 3850],
+        "RSI": [52, 61, 58]
     })
     write_df_to_worksheet(df, "TestSheet")
     print("✅ Données envoyées dans Google Sheets avec succès !")
