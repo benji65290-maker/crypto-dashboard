@@ -30,21 +30,40 @@ except Exception as e:
 # ======================================================
 # ⚙️ Fonctions CoinGecko
 # ======================================================
-def get_price_history(symbol_id):
+def get_price_history(symbol_id, retry=0):
+    """Récupère les prix horaires récents sur CoinGecko avec gestion du rate limit"""
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{symbol_id}/market_chart"
         params = {"vs_currency": "usd", "days": 2, "interval": "hourly"}
         headers = {"User-Agent": "CryptoBot/1.0"}
         r = requests.get(url, params=params, headers=headers, timeout=15)
         print(f"🌐 [{symbol_id}] Status {r.status_code}", flush=True)
+
+        # Gestion du rate limit (HTTP 429)
+        if r.status_code == 429:
+            if retry < 3:
+                wait_time = (retry + 1) * 10
+                print(f"⏳ Rate limit CoinGecko — attente {wait_time}s avant retry...", flush=True)
+                time.sleep(wait_time)
+                return get_price_history(symbol_id, retry + 1)
+            else:
+                print(f"❌ Abandon {symbol_id} après plusieurs tentatives.", flush=True)
+                return None
+
+        if r.status_code != 200:
+            print(f"⚠️ Erreur HTTP {r.status_code} pour {symbol_id}", flush=True)
+            return None
+
         data = r.json().get("prices", [])
         if not data:
             print(f"⚠️ Pas de data pour {symbol_id}", flush=True)
             return None
+
         df = pd.DataFrame(data, columns=["timestamp", "close"])
         df["close"] = df["close"].astype(float)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         return df
+
     except Exception as e:
         print(f"⚠️ Erreur get_price_history({symbol_id}): {e}", flush=True)
         return None
@@ -102,6 +121,7 @@ def update_sheet():
             price = df["close"].iloc[-1]
             rows.append([short, round(price, 3), round(rsi.iloc[-1], 2), signal])
             print(f"✅ {short} → {price}$ | RSI {round(rsi.iloc[-1], 2)} | {signal}", flush=True)
+            time.sleep(2)  # petite pause entre les cryptos pour éviter le 429
 
         if not rows:
             print("⚠️ Aucune donnée récupérée.", flush=True)
