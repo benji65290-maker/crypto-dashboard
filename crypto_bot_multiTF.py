@@ -87,7 +87,7 @@ def compute_indicators(df):
 def analyze_symbol(symbol_pair):
     periods = {
         "1h": 3600,
-        "4h": 14400,
+        "6h": 21600,
         "1d": 86400
     }
     results = {}
@@ -118,8 +118,8 @@ def analyze_symbol(symbol_pair):
         "Crypto": symbol_pair.split("-")[0],
         "RSI_1h": results.get("1h", {}).get("RSI"),
         "Trend_1h": results.get("1h", {}).get("Trend"),
-        "RSI_4h": results.get("4h", {}).get("RSI"),
-        "Trend_4h": results.get("4h", {}).get("Trend"),
+        "RSI_6h": results.get("6h", {}).get("RSI"),
+        "Trend_6h": results.get("6h", {}).get("Trend"),
         "RSI_1d": results.get("1d", {}).get("RSI"),
         "Trend_1d": results.get("1d", {}).get("Trend"),
         "Consensus": consensus,
