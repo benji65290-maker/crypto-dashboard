@@ -122,8 +122,8 @@ def run_bot():
 # 🚀 Point d'entrée principal
 # ======================================================
 if __name__ == "__main__":
-    # Lance le bot dans un thread parallèle
+    port = int(os.environ.get("PORT", 10000))  # 🔧 Render fournit automatiquement cette variable
     threading.Thread(target=run_bot).start()
-    # Démarre le serveur Flask
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=port)
+
 
