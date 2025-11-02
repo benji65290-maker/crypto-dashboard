@@ -4,3 +4,4 @@ numpy
 gspread
 gspread-dataframe
 google-auth
+Flask==3.0.3

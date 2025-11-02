@@ -1,19 +1,9 @@
 services:
   - type: web
-    name: crypto-dashboard
-    runtime: python-3.12.5   # ✅ Force Render à utiliser Python 3.12.5
-    region: frankfurt
-    plan: free
-
+    name: crypto-bot
+    env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python crypto_bot.py
-
     envVars:
-      - key: GOOGLE_SERVICE_JSON
-        sync: false
-      - key: GOOGLE_SHEET_ID
-        sync: false
-      - key: TELEGRAM_TOKEN
-        sync: false
-      - key: CHAT_ID
-        sync: false
+      - key: PORT
+        value: 10000
