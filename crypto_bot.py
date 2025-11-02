@@ -37,7 +37,6 @@ def get_price_history(symbol_id):
         headers = {"User-Agent": "Mozilla/5.0 (compatible; CryptoBot/1.0; +https://render.com)"}
         r = requests.get(url, params=params, headers=headers, timeout=15)
 
-        # Log détaillé pour diagnostic
         print(f"🌐 [{symbol_id}] Status {r.status_code}")
         if r.status_code != 200:
             print(f"⚠️ Erreur API CoinGecko: {r.text[:200]}")
@@ -45,7 +44,7 @@ def get_price_history(symbol_id):
 
         data = r.json().get("prices", [])
         if not data:
-            print(f"⚠️ Pas de data pour {symbol_id} (réponse vide)")
+            print(f"⚠️ Pas de data pour {symbol_id}")
             return None
 
         df = pd.DataFrame(data, columns=["timestamp", "close"])
@@ -127,9 +126,10 @@ def update_sheet():
 # ======================================================
 def run_bot():
     print("🚀 Démarrage de la mise à jour des données crypto (CoinGecko)...")
+    update_sheet()  # 💥 Lancement immédiat
     while True:
-        update_sheet()
         time.sleep(3600)
+        update_sheet()
 
 def keep_alive():
     url = os.getenv("RENDER_EXTERNAL_URL", "https://crypto-dashboard-8tn8.onrender.com")
