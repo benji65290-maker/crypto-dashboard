@@ -12,9 +12,6 @@ from flask import Flask
 
 app = Flask(__name__)
 
-# ======================================================
-# 🔐 Authentification Google Sheets
-# ======================================================
 print("🔐 Initialisation des credentials Google...", flush=True)
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -27,9 +24,9 @@ except Exception as e:
     print(f"❌ Erreur credentials Google : {e}", flush=True)
     raise SystemExit()
 
-# ======================================================
-# ⚙️ API Coinbase – Données OHLC
-# ======================================================
+# ===========================
+# API Coinbase OHLC
+# ===========================
 def get_candles(symbol_pair, granularity):
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles"
     params = {"granularity": granularity}
@@ -50,40 +47,39 @@ def get_candles(symbol_pair, granularity):
         print(f"⚠️ Erreur get_candles({symbol_pair}, {granularity}): {e}", flush=True)
         return None
 
-# ======================================================
-# 📈 RSI réel
-# ======================================================
-def calculate_RSI(prices, period=14):
-    deltas = np.diff(prices)
-    seed = deltas[:period]
-    up = seed[seed >= 0].sum() / period
-    down = -seed[seed < 0].sum() / period
-    rs = up / down if down != 0 else 0
-    rsi = np.zeros_like(prices)
-    rsi[:period] = 100. - 100. / (1. + rs)
+# ===========================
+# Calculs indicateurs
+# ===========================
+def compute_indicators(df):
+    df = df.copy()
+    delta = df["close"].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(14).mean()
+    avg_loss = pd.Series(loss).rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df["RSI14"] = 100 - (100 / (1 + rs))
 
-    for i in range(period, len(prices)):
-        delta = deltas[i - 1]
-        gain = max(delta, 0)
-        loss = -min(delta, 0)
-        up = (up * (period - 1) + gain) / period
-        down = (down * (period - 1) + loss) / period
-        rs = up / down if down != 0 else 0
-        rsi[i] = 100. - 100. / (1. + rs)
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
+    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    return round(rsi[-1], 2)
+    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
 
-# ======================================================
-# 📈 EMA pour tendance
-# ======================================================
-def get_trend(df):
-    ema20 = df["close"].ewm(span=20, adjust=False).mean()
-    ema50 = df["close"].ewm(span=50, adjust=False).mean()
-    return "Bull" if ema20.iloc[-1] > ema50.iloc[-1] else "Bear"
+    df["BB_Mid"] = df["close"].rolling(20).mean()
+    df["BB_Std"] = df["close"].rolling(20).std()
+    df["BB_Upper"] = df["BB_Mid"] + 2 * df["BB_Std"]
+    df["BB_Lower"] = df["BB_Mid"] - 2 * df["BB_Std"]
 
-# ======================================================
-# 🧮 Analyse multi-période
-# ======================================================
+    df["Volume_Mean"] = df["volume"].rolling(20).mean()
+
+    return df
+
+# ===========================
+# Analyse par symbole
+# ===========================
 def analyze_symbol(symbol_pair):
     periods = {
         "1h": 3600,
@@ -96,12 +92,35 @@ def analyze_symbol(symbol_pair):
         df = get_candles(symbol_pair, gran)
         if df is None or df.empty:
             continue
-        closes = df["close"].values
-        if len(closes) < 15:
-            continue
-        rsi = calculate_RSI(closes)
-        trend = get_trend(df)
-        results[label] = {"RSI": rsi, "Trend": trend}
+        df = compute_indicators(df)
+        last = df.iloc[-1]
+
+        rsi = round(last["RSI14"], 2)
+        trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
+
+        macd_crossover = "❌ Aucun"
+        if df["MACD"].iloc[-2] < df["MACD_Signal"].iloc[-2] and last["MACD"] > last["MACD_Signal"]:
+            macd_crossover = "📈 Bullish crossover"
+        elif df["MACD"].iloc[-2] > df["MACD_Signal"].iloc[-2] and last["MACD"] < last["MACD_Signal"]:
+            macd_crossover = "📉 Bearish crossover"
+
+        bb_position = "〰️ Neutre"
+        if last["close"] > last["BB_Upper"]:
+            bb_position = "⬆️ Surachat"
+        elif last["close"] < last["BB_Lower"]:
+            bb_position = "⬇️ Survente"
+
+        volume_trend = "⬇️ Volume baissier"
+        if last["volume"] > last["Volume_Mean"]:
+            volume_trend = "⬆️ Volume haussier"
+
+        results[label] = {
+            "RSI": rsi,
+            "Trend": trend,
+            "MACD": macd_crossover,
+            "Bollinger": bb_position,
+            "Volume": volume_trend
+        }
 
     if not results:
         return None
@@ -119,25 +138,34 @@ def analyze_symbol(symbol_pair):
         "Crypto": symbol_pair.split("-")[0],
         "RSI_1h": results.get("1h", {}).get("RSI"),
         "Trend_1h": results.get("1h", {}).get("Trend"),
+        "MACD_1h": results.get("1h", {}).get("MACD"),
+        "Bollinger_1h": results.get("1h", {}).get("Bollinger"),
+        "Volume_1h": results.get("1h", {}).get("Volume"),
         "RSI_6h": results.get("6h", {}).get("RSI"),
         "Trend_6h": results.get("6h", {}).get("Trend"),
+        "MACD_6h": results.get("6h", {}).get("MACD"),
+        "Bollinger_6h": results.get("6h", {}).get("Bollinger"),
+        "Volume_6h": results.get("6h", {}).get("Volume"),
         "RSI_1d": results.get("1d", {}).get("RSI"),
         "Trend_1d": results.get("1d", {}).get("Trend"),
+        "MACD_1d": results.get("1d", {}).get("MACD"),
+        "Bollinger_1d": results.get("1d", {}).get("Bollinger"),
+        "Volume_1d": results.get("1d", {}).get("Volume"),
         "Consensus": consensus,
         "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     return out
 
-# ======================================================
-# 📊 Mise à jour Google Sheets
-# ======================================================
+# ===========================
+# Mise à jour Google Sheet
+# ===========================
 def update_sheet():
     try:
         sh = gc.open_by_key(SHEET_ID)
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="15")
+            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="20")
 
         cryptos = [
             "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
@@ -165,9 +193,9 @@ def update_sheet():
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
 
-# ======================================================
-# 🔁 Threads
-# ======================================================
+# ===========================
+# Threads
+# ===========================
 def run_bot():
     print("🚀 Lancement du bot Multi-Timeframe", flush=True)
     update_sheet()
@@ -186,9 +214,9 @@ def keep_alive():
             print(f"⚠️ Erreur keep_alive : {e}", flush=True)
         time.sleep(600)
 
-# ======================================================
-# 🌐 Flask
-# ======================================================
+# ===========================
+# Flask
+# ===========================
 @app.route("/")
 def home():
     return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D)"
@@ -198,9 +226,6 @@ def manual_run():
     threading.Thread(target=update_sheet, daemon=True).start()
     return "🧠 Mise à jour manuelle lancée !"
 
-# ======================================================
-# 🧠 Lancement
-# ======================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     threading.Thread(target=run_bot, daemon=True).start()
