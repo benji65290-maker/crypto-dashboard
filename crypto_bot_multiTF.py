@@ -31,9 +31,8 @@ except Exception as e:
 # ⚙️ API Coinbase – Données OHLC
 # ======================================================
 def get_candles(symbol_pair, granularity):
-    """Récupère les bougies Coinbase à la granularité donnée"""
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles"
-    params = {"granularity": granularity}  # secondes
+    params = {"granularity": granularity}
     headers = {"User-Agent": "CryptoBot/1.0"}
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
@@ -43,7 +42,6 @@ def get_candles(symbol_pair, granularity):
         data = r.json()
         if not data:
             return None
-        # Coinbase renvoie [time, low, high, open, close, volume]
         df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
         df["time"] = pd.to_datetime(df["time"], unit="s")
         df = df.sort_values("time")
@@ -53,33 +51,35 @@ def get_candles(symbol_pair, granularity):
         return None
 
 # ======================================================
-# 📈 Calculs d’indicateurs techniques
+# 📈 RSI réel
 # ======================================================
-def compute_indicators(df):
-    """Calcule RSI, MACD, EMA et Bollinger sur un DataFrame"""
-    df = df.copy()
-    delta = df["close"].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(14).mean()
-    avg_loss = pd.Series(loss).rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["RSI14"] = 100 - (100 / (1 + rs))
+def calculate_RSI(prices, period=14):
+    deltas = np.diff(prices)
+    seed = deltas[:period]
+    up = seed[seed >= 0].sum() / period
+    down = -seed[seed < 0].sum() / period
+    rs = up / down if down != 0 else 0
+    rsi = np.zeros_like(prices)
+    rsi[:period] = 100. - 100. / (1. + rs)
 
-    # EMA / MACD
-    ema12 = df["close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    for i in range(period, len(prices)):
+        delta = deltas[i - 1]
+        gain = max(delta, 0)
+        loss = -min(delta, 0)
+        up = (up * (period - 1) + gain) / period
+        down = (down * (period - 1) + loss) / period
+        rs = up / down if down != 0 else 0
+        rsi[i] = 100. - 100. / (1. + rs)
 
-    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
+    return round(rsi[-1], 2)
 
-    df["BB_Mid"] = df["close"].rolling(20).mean()
-    df["BB_Std"] = df["close"].rolling(20).std()
-    df["BB_Upper"] = df["BB_Mid"] + (2 * df["BB_Std"])
-    df["BB_Lower"] = df["BB_Mid"] - (2 * df["BB_Std"])
-    return df
+# ======================================================
+# 📈 EMA pour tendance
+# ======================================================
+def get_trend(df):
+    ema20 = df["close"].ewm(span=20, adjust=False).mean()
+    ema50 = df["close"].ewm(span=50, adjust=False).mean()
+    return "Bull" if ema20.iloc[-1] > ema50.iloc[-1] else "Bear"
 
 # ======================================================
 # 🧮 Analyse multi-période
@@ -96,10 +96,11 @@ def analyze_symbol(symbol_pair):
         df = get_candles(symbol_pair, gran)
         if df is None or df.empty:
             continue
-        df = compute_indicators(df)
-        last = df.iloc[-1]
-        rsi = round(last["RSI14"], 2)
-        trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
+        closes = df["close"].values
+        if len(closes) < 15:
+            continue
+        rsi = calculate_RSI(closes)
+        trend = get_trend(df)
         results[label] = {"RSI": rsi, "Trend": trend}
 
     if not results:
@@ -136,7 +137,7 @@ def update_sheet():
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="10")
+            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="15")
 
         cryptos = [
             "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
@@ -190,7 +191,7 @@ def keep_alive():
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe actif (1h / 4h / 1D)"
+    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D)"
 
 @app.route("/run")
 def manual_run():
