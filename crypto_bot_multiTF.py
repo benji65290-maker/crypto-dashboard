@@ -75,6 +75,15 @@ def compute_indicators(df):
 
     df["Volume_Mean"] = df["volume"].rolling(20).mean()
 
+    df["ATR"] = (df["high"] - df["low"]).rolling(14).mean()
+    df["VWAP"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
+
+    # Détection simplifiée divergence RSI/MACD
+    df["Divergence"] = np.where(
+        (df["RSI14"].diff() > 0) & (df["MACD"].diff() < 0), "⚠️ Possible Bearish",
+        np.where((df["RSI14"].diff() < 0) & (df["MACD"].diff() > 0), "✅ Possible Bullish", "⚪ Stable")
+    )
+
     return df
 
 # ===========================
@@ -119,7 +128,10 @@ def analyze_symbol(symbol_pair):
             "Trend": trend,
             "MACD": macd_crossover,
             "Bollinger": bb_position,
-            "Volume": volume_trend
+            "Volume": volume_trend,
+            "ATR": round(last["ATR"], 2),
+            "VWAP": round(last["VWAP"], 2),
+            "Divergence": last["Divergence"]
         }
 
     if not results:
@@ -136,24 +148,23 @@ def analyze_symbol(symbol_pair):
 
     out = {
         "Crypto": symbol_pair.split("-")[0],
-        "RSI_1h": results.get("1h", {}).get("RSI"),
-        "Trend_1h": results.get("1h", {}).get("Trend"),
-        "MACD_1h": results.get("1h", {}).get("MACD"),
-        "Bollinger_1h": results.get("1h", {}).get("Bollinger"),
-        "Volume_1h": results.get("1h", {}).get("Volume"),
-        "RSI_6h": results.get("6h", {}).get("RSI"),
-        "Trend_6h": results.get("6h", {}).get("Trend"),
-        "MACD_6h": results.get("6h", {}).get("MACD"),
-        "Bollinger_6h": results.get("6h", {}).get("Bollinger"),
-        "Volume_6h": results.get("6h", {}).get("Volume"),
-        "RSI_1d": results.get("1d", {}).get("RSI"),
-        "Trend_1d": results.get("1d", {}).get("Trend"),
-        "MACD_1d": results.get("1d", {}).get("MACD"),
-        "Bollinger_1d": results.get("1d", {}).get("Bollinger"),
-        "Volume_1d": results.get("1d", {}).get("Volume"),
         "Consensus": consensus,
         "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")
     }
+
+    for tf in ["1h", "6h", "1d"]:
+        r = results.get(tf, {})
+        out.update({
+            f"RSI_{tf}": r.get("RSI"),
+            f"Trend_{tf}": r.get("Trend"),
+            f"MACD_{tf}": r.get("MACD"),
+            f"Bollinger_{tf}": r.get("Bollinger"),
+            f"Volume_{tf}": r.get("Volume"),
+            f"ATR_{tf}": r.get("ATR"),
+            f"VWAP_{tf}": r.get("VWAP"),
+            f"Divergence_{tf}": r.get("Divergence")
+        })
+
     return out
 
 # ===========================
@@ -165,7 +176,7 @@ def update_sheet():
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="20")
+            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="30")
 
         cryptos = [
             "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
@@ -224,7 +235,7 @@ def home():
 @app.route("/run")
 def manual_run():
     threading.Thread(target=update_sheet, daemon=True).start()
-    return "🧠 Mise à jour manuelle lancée !"
+    return "🧐 Mise à jour manuelle lancée !"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
