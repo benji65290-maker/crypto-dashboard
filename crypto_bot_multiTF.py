@@ -53,13 +53,10 @@ def get_candles(symbol_pair, granularity):
 def compute_indicators(df):
     df = df.copy()
     delta = df["close"].diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(14).mean()
+    avg_loss = pd.Series(loss).rolling(14).mean()
     rs = avg_gain / avg_loss
     df["RSI14"] = 100 - (100 / (1 + rs))
 
@@ -77,6 +74,28 @@ def compute_indicators(df):
     df["BB_Lower"] = df["BB_Mid"] - 2 * df["BB_Std"]
 
     df["Volume_Mean"] = df["volume"].rolling(20).mean()
+
+    df["VWAP"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
+
+    up = df["high"] - df["high"].shift(1)
+    down = df["low"].shift(1) - df["low"]
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
+    tr1 = df["high"] - df["low"]
+    tr2 = abs(df["high"] - df["close"].shift(1))
+    tr3 = abs(df["low"] - df["close"].shift(1))
+    tr = pd.DataFrame({"tr1": tr1, "tr2": tr2, "tr3": tr3})
+    df["TR"] = tr.max(axis=1)
+    atr = df["TR"].rolling(14).mean()
+    df["+DI"] = 100 * pd.Series(plus_dm).rolling(14).mean() / atr
+    df["-DI"] = 100 * pd.Series(minus_dm).rolling(14).mean() / atr
+    dx = (abs(df["+DI"] - df["-DI"]) / (df["+DI"] + df["-DI"])) * 100
+    df["ADX"] = dx.rolling(14).mean()
+
+    stoch_rsi_window = 14
+    rsi_min = df["RSI14"].rolling(stoch_rsi_window).min()
+    rsi_max = df["RSI14"].rolling(stoch_rsi_window).max()
+    df["StochRSI"] = 100 * (df["RSI14"] - rsi_min) / (rsi_max - rsi_min)
 
     return df
 
@@ -98,7 +117,7 @@ def analyze_symbol(symbol_pair):
         df = compute_indicators(df)
         last = df.iloc[-1]
 
-        rsi = round(last["RSI14"], 2) if not pd.isna(last["RSI14"]) else None
+        rsi = round(last["RSI14"], 2)
         trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
 
         macd_crossover = "❌ Aucun"
@@ -117,12 +136,31 @@ def analyze_symbol(symbol_pair):
         if last["volume"] > last["Volume_Mean"]:
             volume_trend = "⬆️ Volume haussier"
 
+        vwap_trend = "〰️"
+        if last["close"] > last["VWAP"]:
+            vwap_trend = "⬆️ Au-dessus VWAP"
+        elif last["close"] < last["VWAP"]:
+            vwap_trend = "⬇️ En-dessous VWAP"
+
+        adx_strength = "💤 Faible"
+        if last["ADX"] >= 25:
+            adx_strength = "🔥 Fort"
+
+        stochrsi_zone = "〰️"
+        if last["StochRSI"] > 80:
+            stochrsi_zone = "⬆️ Surachat"
+        elif last["StochRSI"] < 20:
+            stochrsi_zone = "⬇️ Survente"
+
         results[label] = {
             "RSI": rsi,
             "Trend": trend,
             "MACD": macd_crossover,
             "Bollinger": bb_position,
-            "Volume": volume_trend
+            "Volume": volume_trend,
+            "VWAP": vwap_trend,
+            "ADX": adx_strength,
+            "StochRSI": stochrsi_zone
         }
 
     if not results:
@@ -138,25 +176,13 @@ def analyze_symbol(symbol_pair):
     )
 
     out = {
-        "Crypto": symbol_pair.split("-")[0],
-        "RSI_1h": results.get("1h", {}).get("RSI"),
-        "Trend_1h": results.get("1h", {}).get("Trend"),
-        "MACD_1h": results.get("1h", {}).get("MACD"),
-        "Bollinger_1h": results.get("1h", {}).get("Bollinger"),
-        "Volume_1h": results.get("1h", {}).get("Volume"),
-        "RSI_6h": results.get("6h", {}).get("RSI"),
-        "Trend_6h": results.get("6h", {}).get("Trend"),
-        "MACD_6h": results.get("6h", {}).get("MACD"),
-        "Bollinger_6h": results.get("6h", {}).get("Bollinger"),
-        "Volume_6h": results.get("6h", {}).get("Volume"),
-        "RSI_1d": results.get("1d", {}).get("RSI"),
-        "Trend_1d": results.get("1d", {}).get("Trend"),
-        "MACD_1d": results.get("1d", {}).get("MACD"),
-        "Bollinger_1d": results.get("1d", {}).get("Bollinger"),
-        "Volume_1d": results.get("1d", {}).get("Volume"),
-        "Consensus": consensus,
-        "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")
+        "Crypto": symbol_pair.split("-")[0]
     }
+    for label in periods.keys():
+        for key in ["RSI", "Trend", "MACD", "Bollinger", "Volume", "VWAP", "ADX", "StochRSI"]:
+            out[f"{key}_{label}"] = results.get(label, {}).get(key)
+    out["Consensus"] = consensus
+    out["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
     return out
 
 # ===========================
@@ -168,7 +194,7 @@ def update_sheet():
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="20")
+            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="50")
 
         cryptos = [
             "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
@@ -217,12 +243,9 @@ def keep_alive():
             print(f"⚠️ Erreur keep_alive : {e}", flush=True)
         time.sleep(600)
 
-# ===========================
-# Flask
-# ===========================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D)"
+    return "✅ Crypto Bot Multi-Timeframe enrichi actif"
 
 @app.route("/run")
 def manual_run():
