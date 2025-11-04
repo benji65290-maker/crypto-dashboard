@@ -53,12 +53,12 @@ def get_candles(symbol_pair, granularity):
 def compute_indicators(df):
     df = df.copy()
     delta = df["close"].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
 
-    roll_up = pd.Series(gain).rolling(window=14).mean()
-    roll_down = pd.Series(loss).rolling(window=14).mean()
-    rs = roll_up / roll_down
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    rs = avg_gain / avg_loss
     df["RSI14"] = 100 - (100 / (1 + rs))
 
     ema12 = df["close"].ewm(span=12, adjust=False).mean()
@@ -77,26 +77,25 @@ def compute_indicators(df):
     df["Volume_Mean"] = df["volume"].rolling(20).mean()
     df["VWAP"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
 
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    df["TR"] = np.maximum.reduce([
-        high - low,
-        abs(high - close.shift()),
-        abs(low - close.shift())
-    ])
-    df["ATR14"] = df["TR"].rolling(window=14).mean()
+    df["TR"] = pd.concat([
+        df["high"] - df["low"],
+        abs(df["high"] - df["close"].shift()),
+        abs(df["low"] - df["close"].shift())
+    ], axis=1).max(axis=1)
+    df["ATR14"] = df["TR"].rolling(14).mean()
 
     low14 = df["low"].rolling(window=14).min()
     high14 = df["high"].rolling(window=14).max()
     df["StochRSI"] = ((df["close"] - low14) / (high14 - low14)) * 100
 
-    up = df["close"].diff()
-    plus_dm = np.where((up > 0) & (up > df["low"].diff()), up, 0)
-    minus_dm = np.where((-up > 0) & (-up > df["high"].diff()), -up, 0)
-    tr = df["TR"]
-    plus_di = 100 * pd.Series(plus_dm).rolling(14).sum() / tr.rolling(14).sum()
-    minus_di = 100 * pd.Series(minus_dm).rolling(14).sum() / tr.rolling(14).sum()
+    plus_dm = df["high"].diff()
+    minus_dm = -df["low"].diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+
+    tr14 = df["TR"].rolling(14).sum()
+    plus_di = 100 * plus_dm.rolling(14).sum() / tr14
+    minus_di = 100 * minus_dm.rolling(14).sum() / tr14
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     df["ADX"] = dx.rolling(14).mean()
 
@@ -203,7 +202,7 @@ def keep_alive():
     while True:
         try:
             requests.get(url, timeout=10)
-            print("💤 Ping keep-alive envoyé.", flush=True)
+            print("💭 Ping keep-alive envoyé.", flush=True)
         except Exception as e:
             print(f"⚠️ Erreur keep_alive : {e}", flush=True)
         time.sleep(600)
