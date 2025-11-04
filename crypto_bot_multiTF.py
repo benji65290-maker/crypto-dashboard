@@ -52,37 +52,43 @@ def get_candles(symbol_pair, granularity):
 # ===========================
 def compute_indicators(df):
     df = df.copy()
+    # RSI
     delta = df["close"].diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(14).mean()
-    avg_loss = pd.Series(loss).rolling(14).mean()
-    rs = avg_gain / avg_loss
+    roll_up = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    roll_down = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = roll_up / roll_down
     df["RSI14"] = 100 - (100 / (1 + rs))
 
+    # MACD
     ema12 = df["close"].ewm(span=12, adjust=False).mean()
     ema26 = df["close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
+    # EMA
     df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
 
+    # Bollinger
     df["BB_Mid"] = df["close"].rolling(20).mean()
     df["BB_Std"] = df["close"].rolling(20).std()
     df["BB_Upper"] = df["BB_Mid"] + 2 * df["BB_Std"]
     df["BB_Lower"] = df["BB_Mid"] - 2 * df["BB_Std"]
 
+    # Volume moyen
     df["Volume_Mean"] = df["volume"].rolling(20).mean()
 
-    df["ATR"] = (df["high"] - df["low"]).rolling(14).mean()
-    df["VWAP"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
-
-    # Détection simplifiée divergence RSI/MACD
-    df["Divergence"] = np.where(
-        (df["RSI14"].diff() > 0) & (df["MACD"].diff() < 0), "⚠️ Possible Bearish",
-        np.where((df["RSI14"].diff() < 0) & (df["MACD"].diff() > 0), "✅ Possible Bullish", "⚪ Stable")
-    )
+    # ATR
+    df["TR"] = df[["high", "low", "close"]].copy()
+    df["TR"] = df[["high", "low", "close"]].apply(
+        lambda row: max(
+            row["high"] - row["low"],
+            abs(row["high"] - df["close"].shift(1)),
+            abs(row["low"] - df["close"].shift(1))
+        ), axis=1)
+    df["ATR14"] = df["TR"].rolling(14, min_periods=14).mean()
 
     return df
 
@@ -104,7 +110,7 @@ def analyze_symbol(symbol_pair):
         df = compute_indicators(df)
         last = df.iloc[-1]
 
-        rsi = round(last["RSI14"], 2)
+        rsi = round(last["RSI14"], 2) if not pd.isna(last["RSI14"]) else None
         trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
 
         macd_crossover = "❌ Aucun"
@@ -123,15 +129,15 @@ def analyze_symbol(symbol_pair):
         if last["volume"] > last["Volume_Mean"]:
             volume_trend = "⬆️ Volume haussier"
 
+        atr = round(last["ATR14"], 4) if not pd.isna(last["ATR14"]) else None
+
         results[label] = {
             "RSI": rsi,
             "Trend": trend,
             "MACD": macd_crossover,
             "Bollinger": bb_position,
             "Volume": volume_trend,
-            "ATR": round(last["ATR"], 2),
-            "VWAP": round(last["VWAP"], 2),
-            "Divergence": last["Divergence"]
+            "ATR": atr
         }
 
     if not results:
@@ -148,23 +154,27 @@ def analyze_symbol(symbol_pair):
 
     out = {
         "Crypto": symbol_pair.split("-")[0],
+        "RSI_1h": results.get("1h", {}).get("RSI"),
+        "Trend_1h": results.get("1h", {}).get("Trend"),
+        "MACD_1h": results.get("1h", {}).get("MACD"),
+        "Bollinger_1h": results.get("1h", {}).get("Bollinger"),
+        "Volume_1h": results.get("1h", {}).get("Volume"),
+        "ATR_1h": results.get("1h", {}).get("ATR"),
+        "RSI_6h": results.get("6h", {}).get("RSI"),
+        "Trend_6h": results.get("6h", {}).get("Trend"),
+        "MACD_6h": results.get("6h", {}).get("MACD"),
+        "Bollinger_6h": results.get("6h", {}).get("Bollinger"),
+        "Volume_6h": results.get("6h", {}).get("Volume"),
+        "ATR_6h": results.get("6h", {}).get("ATR"),
+        "RSI_1d": results.get("1d", {}).get("RSI"),
+        "Trend_1d": results.get("1d", {}).get("Trend"),
+        "MACD_1d": results.get("1d", {}).get("MACD"),
+        "Bollinger_1d": results.get("1d", {}).get("Bollinger"),
+        "Volume_1d": results.get("1d", {}).get("Volume"),
+        "ATR_1d": results.get("1d", {}).get("ATR"),
         "Consensus": consensus,
         "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")
     }
-
-    for tf in ["1h", "6h", "1d"]:
-        r = results.get(tf, {})
-        out.update({
-            f"RSI_{tf}": r.get("RSI"),
-            f"Trend_{tf}": r.get("Trend"),
-            f"MACD_{tf}": r.get("MACD"),
-            f"Bollinger_{tf}": r.get("Bollinger"),
-            f"Volume_{tf}": r.get("Volume"),
-            f"ATR_{tf}": r.get("ATR"),
-            f"VWAP_{tf}": r.get("VWAP"),
-            f"Divergence_{tf}": r.get("Divergence")
-        })
-
     return out
 
 # ===========================
@@ -225,9 +235,6 @@ def keep_alive():
             print(f"⚠️ Erreur keep_alive : {e}", flush=True)
         time.sleep(600)
 
-# ===========================
-# Flask
-# ===========================
 @app.route("/")
 def home():
     return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D)"
