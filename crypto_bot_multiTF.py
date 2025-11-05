@@ -46,6 +46,81 @@ def ensure_numeric(df, cols):
 # ======================================================
 # 🌍 Indicateurs de Sentiment & Émotion
 # ======================================================
+def get_market_sentiment():
+    """Récupère les indicateurs de sentiment global (Fear & Greed, actualité, social, volatilité)."""
+    try:
+        # --- Fear & Greed Index (Alternative.me)
+        fng_url = "https://api.alternative.me/fng/"
+        fg_data = requests.get(fng_url, timeout=10).json()
+        fg_value = int(fg_data["data"][0]["value"])
+        if fg_value < 25:
+            fg_label = "😱 Extreme Fear"
+        elif fg_value < 50:
+            fg_label = "😟 Fear"
+        elif fg_value < 75:
+            fg_label = "😃 Greed"
+        else:
+            fg_label = "🤑 Extreme Greed"
+
+        # --- Social Sentiment via Coingecko Trending
+        try:
+            trending = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10).json()
+            coins = [c["item"]["symbol"].upper() for c in trending["coins"]]
+            score_social = min(100, len(coins) * 10)  # proxy euph
+        except:
+            score_social = 0
+
+        # --- News Intensity (fallback via Coingecko global)
+        try:
+            news_req = requests.get("https://api.coingecko.com/api/v3/global", timeout=10).json()
+            mcap_change = news_req["data"]["market_cap_change_percentage_24h_usd"]
+            news_intensity = min(1.0, abs(mcap_change) / 5)
+        except:
+            news_intensity = 0.5
+
+        # --- BTC Volatility 30d
+        try:
+            btc_candles = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400", timeout=10).json()
+            df_btc = pd.DataFrame(btc_candles, columns=["time","low","high","open","close","volume"])
+            df_btc["returns"] = pd.Series(df_btc["close"]).pct_change()
+            vol_30d = np.std(df_btc["returns"].tail(30)) * np.sqrt(365)
+        except:
+            vol_30d = np.nan
+
+        return {
+            "FearGreed_Index": fg_value,
+            "FearGreed_Label": fg_label,
+            "Social_Sentiment": score_social,
+            "News_Intensity": round(news_intensity, 3),
+            "BTC_Volatility_30d": round(vol_30d, 4)
+        }
+
+    except Exception as e:
+        print(f"⚠️ Erreur get_market_sentiment() : {e}", flush=True)
+        return {
+            "FearGreed_Index": np.nan,
+            "FearGreed_Label": "❌",
+            "Social_Sentiment": np.nan,
+            "News_Intensity": np.nan,
+            "BTC_Volatility_30d": np.nan
+        }
+
+# ======================================================
+# ⚙️ API Coinbase – Données OHLC
+# ======================================================
+def get_candles(symbol_pair, granularity):
+    """
+    Coinbase renvoie des lignes [time, low, high, open, close, volume]
+    time est en secondes (UTC). On trie par date croissante.
+    """
+    url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles"
+    params = {"granularity": granularity}
+    headers = {"User-Agent": "CryptoBot/1.0"}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=12)
+        if r.status_code != 200:
+            print(f"🌐 [{symbol_pair}] HTTP {r.status_code} ({granularity}s)", flush=True)
+            return None
         data = r.json()
         if not data:
             return None
@@ -276,10 +351,88 @@ def analyze_symbol(symbol_pair):
             flat[f"{k}_{tf}"] = v
     return flat
 
+# ======================================================
+# 📊 Mise à jour Google Sheets
+# ======================================================
+def update_sheet():
+    try:
+        sh = gc.open_by_key(SHEET_ID)
+        try:
+            ws = sh.worksheet("MultiTF")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title="MultiTF", rows="200", cols="120")
+
+        cryptos = [
+            "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
+            "ADA-USD", "DOGE-USD", "AVAX-USD", "XRP-USD",
+            "LINK-USD", "MATIC-USD"
+        ]
+
+        rows = []
+        for pair in cryptos:
+            res = analyze_symbol(pair)
+            if res:
+                rows.append(res)
+                print(f"✅ {res['Crypto']} → {res['Consensus']}", flush=True)
+            time.sleep(1.2)  # petite pause anti-burst
+
+        if not rows:
+            print("⚠️ Aucune donnée récupérée", flush=True)
+            return
+
+        df_out = pd.DataFrame(rows)
+        ws.clear()
+        set_with_dataframe(ws, df_out)
+        print("✅ Feuille 'MultiTF' mise à jour !", flush=True)
+
+    except Exception as e:
+        print(f"❌ Erreur update_sheet() : {e}", flush=True)
+
 
 # ======================================================
 # 📊 Mise à jour Google Sheets (avec ajout des indicateurs émotionnels)
 # ======================================================
+def update_sheet():
+    try:
+        sh = gc.open_by_key(SHEET_ID)
+        try:
+            ws = sh.worksheet("MultiTF")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title="MultiTF", rows="200", cols="120")
+
+        cryptos = [
+            "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
+            "ADA-USD", "DOGE-USD", "AVAX-USD", "XRP-USD",
+            "LINK-USD", "MATIC-USD"
+        ]
+
+        rows = []
+
+        # --- 1️⃣ Ajout d’une ligne “Sentiment Global”
+        sentiment = get_market_sentiment()
+        sentiment["Crypto"] = "🌎 Sentiment_Global"
+        sentiment["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        rows.append(sentiment)
+
+        # --- 2️⃣ Boucle sur cryptos
+        for pair in cryptos:
+            res = analyze_symbol(pair)
+            if res:
+                rows.append(res)
+                print(f"✅ {res['Crypto']} → {res['Consensus']}", flush=True)
+            time.sleep(1.5)
+
+        if not rows:
+            print("⚠️ Aucune donnée récupérée", flush=True)
+            return
+
+        df_out = pd.DataFrame(rows)
+        ws.clear()
+        set_with_dataframe(ws, df_out)
+        print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels !", flush=True)
+
+    except Exception as e:
+        print(f"❌ Erreur update_sheet() : {e}", flush=True)
 
 # ======================================================
 # 🔁 Threads
