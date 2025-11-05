@@ -44,6 +44,43 @@ def ensure_numeric(df, cols):
     return df
 
 # ======================================================
+# 🎨 Helpers lisibilité (pastilles couleur)
+# ======================================================
+def _rsizone_label(rsi):
+    try:
+        if rsi is None or pd.isna(rsi):
+            return "RSI N/A ⚪"
+        r = float(rsi)
+        if r < 30: return "RSI Achat 🟢"
+        if r > 70: return "RSI Vente 🔴"
+        return "RSI Neutre ⚪"
+    except Exception:
+        return "RSI N/A ⚪"
+
+def _trend_label(trend):
+    if trend == "Bull": return "Tendance Bull 🟢"
+    if trend == "Bear": return "Tendance Bear 🔴"
+    return "Tendance N/A ⚪"
+
+def _macd_label(s):
+    s = "" if s is None else str(s)
+    if "Bullish" in s: return "MACD Cross Bullish 🟢"
+    if "Bearish" in s: return "MACD Cross Bearish 🔴"
+    return "MACD Cross Neutre ⚪"
+
+def _bb_label(s):
+    s = "" if s is None else str(s)
+    if "Survente" in s: return "Bollinger Survente 🟢"
+    if "Surachat" in s: return "Bollinger Surachat 🔴"
+    return "Bollinger Neutre ⚪"
+
+def _vol_label(s):
+    s = "" if s is None else str(s).lower()
+    if "haussier" in s: return "Volume Haussier 🟢"
+    if "baissier" in s: return "Volume Baissier 🔴"
+    return "Volume Neutre ⚪"
+
+# ======================================================
 # 🌍 Indicateurs de Sentiment & Émotion
 # ======================================================
 def get_market_sentiment():
@@ -280,7 +317,6 @@ def summarize_last_row(df):
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
 
-    # Signaux lisibles
     trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
 
     if (prev["MACD"] < prev["MACD_Signal"]) and (last["MACD"] > last["MACD_Signal"]):
@@ -299,15 +335,23 @@ def summarize_last_row(df):
 
     vol_trend = "⬆️ Volume haussier" if last["volume"] > last["Volume_Mean"] else "⬇️ Volume baissier"
 
+    rsi_val = safe_round(last["RSI14"])
+
     out = {
-        "RSI": safe_round(last["RSI14"]),
+        "Close": safe_round(last["close"]),
+        "RSI": rsi_val,
         "Trend": trend,
         "MACD_Cross": macd_signal,
         "Bollinger_Pos": bb_pos,
         "Volume_Sentiment": vol_trend,
+        # Versions lisibles
+        "RSI_View": _rsizone_label(rsi_val),
+        "Trend_View": _trend_label(trend),
+        "MACD_Cross_View": _macd_label(macd_signal),
+        "Bollinger_Pos_View": _bb_label(bb_pos),
+        "Volume_Sentiment_View": _vol_label(vol_trend),
     }
 
-    # Ajouter toutes les valeurs numériques clés (arrondies)
     for k in ADV_KEYS:
         v = last.get(k, np.nan)
         out[k] = safe_round(v) if k not in ["SuperTrend"] else (v if isinstance(v, str) else "N/A")
@@ -351,6 +395,22 @@ def analyze_symbol(symbol_pair):
             flat[f"{k}_{tf}"] = v
     return flat
 
+
+
+def _prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for c in df.columns:
+        new = c
+        # timeframe suffixes
+        new = new.replace("_1h", " 1H").replace("_6h", " 6H").replace("_1d", " 1D")
+        # readable replacements
+        new = new.replace("MACD_Cross", "MACD Cross")                 .replace("Bollinger_Pos", "Bollinger Pos")                 .replace("Volume_Sentiment", "Volume Sentiment")                 .replace("RSI_View", "RSI Signal")                 .replace("Trend_View", "Trend Signal")                 .replace("MACD_Cross_View", "MACD Cross Signal")                 .replace("Bollinger_Pos_View", "Bollinger Signal")                 .replace("Volume_Sentiment_View", "Volume Signal")
+        # tidy spaces
+        new = re.sub(r"\s{2,}", " ", new).strip()
+        if new != c:
+            rename_map[c] = new
+    return df.rename(columns=rename_map)
+
 # ======================================================
 # 📊 Mise à jour Google Sheets (avec ajout des indicateurs émotionnels)
 # ======================================================
@@ -392,270 +452,6 @@ def update_sheet():
         ws.clear()
         set_with_dataframe(ws, df_out)
         print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels !", flush=True)
-
-    except Exception as e:
-        print(f"❌ Erreur update_sheet() : {e}", flush=True)
-
-# ======================================================
-# 🌍 Indicateurs de Sentiment & Émotion (par crypto)
-# ======================================================
-COINGECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-    "ADA": "cardano",
-    "DOGE": "dogecoin",
-    "AVAX": "avalanche-2",
-    "XRP": "ripple",
-    "LINK": "chainlink",
-    "MATIC": "matic-network",
-}
-
-def get_sentiment_for_symbol(symbol: str):
-    """
-    Récupère les indicateurs de sentiment spécifiques à une crypto.
-    - Fear & Greed (global)
-    - Social Sentiment (présence dans trending)
-    - News Intensity (|var 24h| de la crypto)
-    - Sentiment_Score (0-100)
-    """
-    try:
-        # Fear & Greed global
-        fng = requests.get("https://api.alternative.me/fng/", timeout=10).json()
-        fg_value = int(fng["data"][0]["value"])
-        if fg_value < 25: fg_label = "😱 Extreme Fear"
-        elif fg_value < 50: fg_label = "😟 Fear"
-        elif fg_value < 75: fg_label = "😃 Greed"
-        else: fg_label = "🤑 Extreme Greed"
-
-        # Trending (Coingecko)
-        trending = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10).json()
-        trending_symbols = [c["item"]["symbol"].upper() for c in trending.get("coins", [])]
-        social_sent = 100 if symbol.upper() in trending_symbols else 30  # 30 par défaut
-
-        # News intensity via var 24h de la crypto
-        cg_id = COINGECKO_IDS.get(symbol.upper())
-        news_intensity = 0.5
-        if cg_id:
-            details = requests.get(
-                f"https://api.coingecko.com/api/v3/coins/{cg_id}?localization=false&tickers=false&market_data=true",
-                timeout=12
-            ).json()
-            chg = details.get("market_data", {}).get("price_change_percentage_24h")
-            if chg is None:
-                chg = 0.0
-            news_intensity = min(1.0, abs(float(chg)) / 10.0)
-
-        # Score synthétique (0-100) simple non pondéré
-        sentiment_score = int(max(0, min(100, (fg_value * 0.4) + (social_sent * 0.2) + ((1.0 - news_intensity) * 100 * 0.4))))
-
-        return {
-            "FearGreed_Index": fg_value,
-            "FearGreed_Label": fg_label,
-            "Social_Sentiment": int(social_sent),
-            "News_Intensity": round(news_intensity, 3),
-            "Sentiment_Score": int(sentiment_score),
-        }
-    except Exception as e:
-        print(f"⚠️ Erreur sentiment {symbol}: {e}", flush=True)
-        return {
-            "FearGreed_Index": np.nan,
-            "FearGreed_Label": "❌",
-            "Social_Sentiment": np.nan,
-            "News_Intensity": np.nan,
-            "Sentiment_Score": np.nan,
-        }
-
-# ======================================================
-# 🧮 Scoring & étiquettes couleur
-# ======================================================
-def _score_from_rsi(rsi):
-    if pd.isna(rsi): return 0
-    if rsi < 30: return 1
-    if rsi > 70: return -1
-    return 0
-
-def _score_from_macd_cross(s):
-    if not s:
-        return 0
-    s = str(s)
-    if "Bullish" in s: return 1
-    if "Bearish" in s: return -1
-    return 0
-
-def _score_from_bb(s):
-    if not s:
-        return 0
-    s = str(s)
-    if "Survente" in s: return 1
-    if "Surachat" in s: return -1
-    return 0
-
-def _score_from_trend(trend):
-    if trend == "Bull": return 1
-    if trend == "Bear": return -1
-    return 0
-
-def _score_from_volume(s):
-    if not s:
-        return 0
-    s = str(s)
-    if "haussier" in s: return 0.5
-    if "baissier" in s: return -0.5
-    return 0
-
-def _label_from_score(x):
-    if x > 0.3: return "Achat 🟢"
-    if x < -0.3: return "Vente 🔴"
-    return "Neutre ⚪"
-
-def compute_global_score(results_by_tf, sentiment_info):
-    """
-    results_by_tf: dict {"1h": {...}, "6h": {...}, "1d": {...}}
-    sentiment_info: dict avec Sentiment_Score 0-100
-    Retourne (score_decimal_0_10, signal_global_label)
-    """
-    tf_scores = []
-    for tf, vals in results_by_tf.items():
-        s = 0.0
-        s += _score_from_trend(vals.get("Trend"))
-        s += _score_from_macd_cross(vals.get("MACD_Cross", ""))
-        s += _score_from_bb(vals.get("Bollinger_Pos", ""))
-        s += _score_from_rsi(vals.get("RSI"))
-        s += _score_from_volume(vals.get("Volume_Sentiment", ""))
-        # pondération légère 1D > 6h > 1h
-        w = 1.0 if tf == "1h" else (1.2 if tf == "6h" else 1.5)
-        tf_scores.append(s * w)
-
-    raw = np.nanmean(tf_scores) if tf_scores else 0.0
-    # ajoute sentiment (0..100 -> -1..+1)
-    sent = sentiment_info.get("Sentiment_Score")
-    if sent is not None and not pd.isna(sent):
-        raw += ((float(sent) - 50.0) / 50.0)  # -1 à +1
-
-    # Clamp & map to 0..10
-    raw = max(-5.0, min(5.0, raw))
-    score_0_10 = round((raw + 5.0) * (10.0 / 10.0), 2)  # (-5..+5) -> (0..10)
-    return score_0_10, _label_from_score(raw)
-
-# ======================================================
-# 🧮 Analyse multi-période (ajout Close dans le résumé)
-# ======================================================
-def summarize_last_row(df):
-    """Retourne un dict (valeurs dernière ligne) formaté + signaux lisibles."""
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
-
-    trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
-
-    if (prev["MACD"] < prev["MACD_Signal"]) and (last["MACD"] > last["MACD_Signal"]):
-        macd_signal = "📈 Bullish"
-    elif (prev["MACD"] > prev["MACD_Signal"]) and (last["MACD"] < last["MACD_Signal"]):
-        macd_signal = "📉 Bearish"
-    else:
-        macd_signal = "❌ Aucun"
-
-    if last["close"] > last["BB_Upper"]:
-        bb_pos = "⬆️ Surachat"
-    elif last["close"] < last["BB_Lower"]:
-        bb_pos = "⬇️ Survente"
-    else:
-        bb_pos = "〰️ Neutre"
-
-    vol_trend = "⬆️ Volume haussier" if last["volume"] > last["Volume_Mean"] else "⬇️ Volume baissier"
-
-    out = {
-        "Close": safe_round(last["close"]),
-        "RSI": safe_round(last["RSI14"]),
-        "Trend": trend,
-        "MACD_Cross": macd_signal,
-        "Bollinger_Pos": bb_pos,
-        "Volume_Sentiment": vol_trend,
-    }
-
-    for k in ADV_KEYS:
-        v = last.get(k, np.nan)
-        out[k] = safe_round(v) if k not in ["SuperTrend"] else (v if isinstance(v, str) else "N/A")
-
-    return out
-
-# ======================================================
-# 📊 Mise à jour Google Sheets (corrigée: par-crypto + score + émotions)
-# ======================================================
-def update_sheet():
-    try:
-        sh = gc.open_by_key(SHEET_ID)
-        try:
-            ws = sh.worksheet("MultiTF")
-        except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="500", cols="250")
-
-        cryptos = [
-            "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
-            "ADA-USD", "DOGE-USD", "AVAX-USD", "XRP-USD",
-            "LINK-USD", "MATIC-USD"
-        ]
-
-        rows = []
-
-        for pair in cryptos:
-            res = analyze_symbol(pair)
-            if not res: 
-                continue
-
-            symbol = pair.split("-")[0]
-            senti = get_sentiment_for_symbol(symbol)
-
-            # reconstruire results_by_tf (limité aux clés "RSI, Trend, MACD_Cross, Bollinger_Pos, Volume_Sentiment")
-            tfs = {}
-            for tf in ["1h","6h","1d"]:
-                vals = {}
-                for k in ["RSI","Trend","MACD_Cross","Bollinger_Pos","Volume_Sentiment"]:
-                    vals[k] = res.get(f"{k}_{tf}")
-                tfs[tf] = vals
-
-            score_10, signal_global = compute_global_score(tfs, senti)
-
-            # Fusionner: placer GlobalScore après Crypto, sentiment avant LastUpdate
-            flat = {"Crypto": res["Crypto"], "GlobalScore_0_10": score_10, "Signal_Global": signal_global}
-            # Conserver consensus actuel
-            flat["Consensus"] = res.get("Consensus")
-
-            # recopier toutes les colonnes techniques déjà présentes
-            for k, v in res.items():
-                if k in ["Crypto","Consensus","LastUpdate"]: 
-                    continue
-                flat[k] = v
-
-            # Ajouter sentiments
-            flat.update(senti)
-
-            # LastUpdate en dernier
-            flat["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-            rows.append(flat)
-            print(f"✅ {symbol} → Score {score_10}/10 | {signal_global}", flush=True)
-            time.sleep(1.2)
-
-        if not rows:
-            print("⚠️ Aucune donnée récupérée", flush=True)
-            return
-
-        # Harmoniser l'ordre des colonnes: Crypto, GlobalScore, Signal_Global, Consensus, ... tout le reste ..., sentiments, LastUpdate
-        cols_front = ["Crypto","GlobalScore_0_10","Signal_Global","Consensus"]
-        sentiment_cols = ["FearGreed_Index","FearGreed_Label","Social_Sentiment","News_Intensity","Sentiment_Score","LastUpdate"]
-
-        # Construire DataFrame puis réordonner
-        df_out = pd.DataFrame(rows)
-        # bouger colonnes si présentes
-        remaining = [c for c in df_out.columns if c not in cols_front + sentiment_cols]
-        ordered = cols_front + remaining + sentiment_cols
-        df_out = df_out.reindex(columns=[c for c in ordered if c in df_out.columns])
-
-        ws.clear()
-        set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour (techniques + émotions par crypto + score global).", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
