@@ -632,13 +632,28 @@ def update_sheet():
 
         rows = []
 
+        rows = []
+
         for pair in cryptos:
+            print(f"🚀 Traitement de {pair} ...", flush=True)
             res = analyze_symbol(pair)
-            if not res:
+
+            if res is None or not isinstance(res, dict):
+                print(f"⚠️ Données manquantes pour {pair} — crypto ignorée.", flush=True)
                 continue
 
             symbol = pair.split("-")[0]
             senti = get_sentiment_for_symbol(symbol)
+
+            if not isinstance(senti, dict):
+                print(f"⚠️ Sentiment non récupéré pour {symbol} — valeurs vides utilisées.", flush=True)
+                senti = {
+                    "FearGreed_Index": np.nan,
+                    "FearGreed_Label": "❌",
+                    "Social_Sentiment": np.nan,
+                    "News_Intensity": np.nan,
+                    "Sentiment_Score": np.nan,
+                }
 
             # Reconstruction par timeframe pour scoring global
             tfs = {}
@@ -657,13 +672,13 @@ def update_sheet():
             flat = {"Crypto": res["Crypto"], "GlobalScore_0_10": score_10, "Signal_Global": signal_global}
             flat["Consensus"] = res.get("Consensus")
 
-            # Ajouter les indicateurs techniques
+            # Ajouter indicateurs techniques
             for k, v in res.items():
                 if k in ["Crypto","Consensus","LastUpdate"]:
                     continue
                 flat[k] = v
 
-            # Ajouter les sentiments avant LastUpdate
+            # Ajouter sentiments
             flat.update(senti)
             flat["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -672,7 +687,7 @@ def update_sheet():
             time.sleep(1.2)
 
         if not rows:
-            print("⚠️ Aucune donnée récupérée", flush=True)
+            print("⚠️ Aucun résultat valide — rien à écrire dans Google Sheets.", flush=True)
             return
 
         df_out = pd.DataFrame(rows)
