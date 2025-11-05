@@ -28,7 +28,7 @@ except Exception as e:
     raise SystemExit()
 
 # ======================================================
-# ⚙️ Utilitaires
+# ⚙️ Fonctions utilitaires
 # ======================================================
 def safe_round(x, n=2):
     try:
@@ -44,75 +44,73 @@ def ensure_numeric(df, cols):
     return df
 
 # ======================================================
-# 🌍 Indicateurs de Sentiment & Émotion
+# 🌍 Indicateurs d’émotion (par crypto)
 # ======================================================
-def get_market_sentiment():
-    """Récupère les indicateurs de sentiment global (Fear & Greed, actualité, social, volatilité)."""
+def get_sentiment_for_symbol(symbol):
+    """Récupère un score émotionnel individuel pour chaque crypto."""
     try:
-        # --- Fear & Greed Index (Alternative.me)
-        fng_url = "https://api.alternative.me/fng/"
-        fg_data = requests.get(fng_url, timeout=10).json()
-        fg_value = int(fg_data["data"][0]["value"])
-        if fg_value < 25:
-            fg_label = "😱 Extreme Fear"
-        elif fg_value < 50:
-            fg_label = "😟 Fear"
-        elif fg_value < 75:
-            fg_label = "😃 Greed"
-        else:
-            fg_label = "🤑 Extreme Greed"
+        symbol = symbol.split("-")[0].lower()
 
-        # --- Social Sentiment via Coingecko Trending
+        # Fear & Greed Index global
         try:
-            trending = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10).json()
-            coins = [c["item"]["symbol"].upper() for c in trending["coins"]]
-            score_social = min(100, len(coins) * 10)  # proxy euph
+            fng_data = requests.get("https://api.alternative.me/fng/", timeout=8).json()
+            fg_value = int(fng_data["data"][0]["value"])
+            if fg_value < 25:
+                fg_label = "😱 Extreme Fear"
+            elif fg_value < 50:
+                fg_label = "😟 Fear"
+            elif fg_value < 75:
+                fg_label = "😃 Greed"
+            else:
+                fg_label = "🤑 Extreme Greed"
         except:
-            score_social = 0
+            fg_value, fg_label = np.nan, "❌"
 
-        # --- News Intensity (fallback via Coingecko global)
+        # Social Sentiment (présence dans trending Coingecko)
         try:
-            news_req = requests.get("https://api.coingecko.com/api/v3/global", timeout=10).json()
-            mcap_change = news_req["data"]["market_cap_change_percentage_24h_usd"]
-            news_intensity = min(1.0, abs(mcap_change) / 5)
+            trending = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=8).json()
+            trending_symbols = [c["item"]["symbol"].lower() for c in trending["coins"]]
+            score_social = 100 if symbol in trending_symbols else 40
         except:
-            news_intensity = 0.5
+            score_social = np.nan
 
-        # --- BTC Volatility 30d
+        # News Intensity via variation 24h
         try:
-            btc_candles = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400", timeout=10).json()
-            df_btc = pd.DataFrame(btc_candles, columns=["time","low","high","open","close","volume"])
-            df_btc["returns"] = pd.Series(df_btc["close"]).pct_change()
-            vol_30d = np.std(df_btc["returns"].tail(30)) * np.sqrt(365)
+            data = requests.get(f"https://api.coingecko.com/api/v3/coins/{symbol}", timeout=8).json()
+            change_24h = data["market_data"]["price_change_percentage_24h"] or 0
+            news_intensity = min(1.0, abs(change_24h) / 10)
         except:
-            vol_30d = np.nan
+            news_intensity = np.nan
+
+        # Score synthétique d’émotion
+        sentiment_score = np.nanmean([
+            fg_value / 100 if not np.isnan(fg_value) else np.nan,
+            score_social / 100 if not np.isnan(score_social) else np.nan,
+            news_intensity if not np.isnan(news_intensity) else np.nan
+        ]) * 100
 
         return {
             "FearGreed_Index": fg_value,
             "FearGreed_Label": fg_label,
             "Social_Sentiment": score_social,
             "News_Intensity": round(news_intensity, 3),
-            "BTC_Volatility_30d": round(vol_30d, 4)
+            "Sentiment_Score": round(sentiment_score, 1)
         }
 
     except Exception as e:
-        print(f"⚠️ Erreur get_market_sentiment() : {e}", flush=True)
+        print(f"⚠️ Erreur get_sentiment_for_symbol({symbol}) : {e}", flush=True)
         return {
             "FearGreed_Index": np.nan,
             "FearGreed_Label": "❌",
             "Social_Sentiment": np.nan,
             "News_Intensity": np.nan,
-            "BTC_Volatility_30d": np.nan
+            "Sentiment_Score": np.nan
         }
 
 # ======================================================
-# ⚙️ API Coinbase – Données OHLC
+# ⚙️ Récupération données Coinbase (OHLC)
 # ======================================================
 def get_candles(symbol_pair, granularity):
-    """
-    Coinbase renvoie des lignes [time, low, high, open, close, volume]
-    time est en secondes (UTC). On trie par date croissante.
-    """
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles"
     params = {"granularity": granularity}
     headers = {"User-Agent": "CryptoBot/1.0"}
@@ -125,234 +123,106 @@ def get_candles(symbol_pair, granularity):
         if not data:
             return None
         df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-        df["time"]  = pd.to_datetime(df["time"], unit="s", utc=True)
+        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
         df = df.sort_values("time").reset_index(drop=True)
-        df = ensure_numeric(df, ["low","high","open","close","volume"])
+        df = ensure_numeric(df, ["low", "high", "open", "close", "volume"])
         return df
     except Exception as e:
         print(f"⚠️ Erreur get_candles({symbol_pair}, {granularity}): {e}", flush=True)
         return None
 
 # ======================================================
-# 📈 Calculs d’indicateurs techniques (base + avancés)
+# 📈 Indicateurs techniques
 # ======================================================
 def compute_indicators(df):
-    """
-    Calcule tous les indicateurs sur une copie du DataFrame (ne modifie pas l’original).
-    Les NaN initiales sont normales (périodes de chauffe).
-    """
     if df is None or df.empty:
         return df
 
     df = df.copy()
-    close = df["close"]
-    high  = df["high"]
-    low   = df["low"]
-    vol   = df["volume"]
+    close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
 
-    # ---------- RSI (Wilder) ----------
+    # RSI
     delta = close.diff()
-    up = delta.clip(lower=0)
-    down = (-delta).clip(lower=0)
-    # Moyennes exponentielles avec alpha=1/14 => lissage de Wilder
+    up, down = delta.clip(lower=0), (-delta).clip(lower=0)
     roll_up = up.ewm(alpha=1/14, adjust=False).mean()
     roll_down = down.ewm(alpha=1/14, adjust=False).mean()
     rs = roll_up / roll_down.replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
 
-    # ---------- MACD ----------
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    # MACD
+    ema12, ema26 = close.ewm(span=12, adjust=False).mean(), close.ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    # ---------- EMA Trend ----------
-    df["EMA20"] = close.ewm(span=20, adjust=False).mean()
-    df["EMA50"] = close.ewm(span=50, adjust=False).mean()
+    # EMA Trend
+    df["EMA20"], df["EMA50"] = close.ewm(span=20).mean(), close.ewm(span=50).mean()
 
-    # ---------- Bollinger ----------
-    bb_mid = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-    df["BB_Mid"]   = bb_mid
-    df["BB_Upper"] = bb_mid + 2 * bb_std
-    df["BB_Lower"] = bb_mid - 2 * bb_std
+    # Bollinger
+    bb_mid, bb_std = close.rolling(20).mean(), close.rolling(20).std()
+    df["BB_Mid"], df["BB_Upper"], df["BB_Lower"] = bb_mid, bb_mid + 2*bb_std, bb_mid - 2*bb_std
 
-    # ---------- Volume / VWAP ----------
+    # Volume & VWAP
     df["Volume_Mean"] = vol.rolling(20).mean()
     df["VWAP"] = (close * vol).cumsum() / vol.replace(0, np.nan).cumsum()
 
-    # ---------- ATR (True Range + Wilder MA) ----------
+    # ATR
     prev_close = close.shift(1)
-    tr_components = pd.concat([
-        (high - low),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1)
-    TR = tr_components.max(axis=1)
-    # ATR Wilder
+    TR = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     df["ATR14"] = TR.ewm(alpha=1/14, adjust=False).mean()
-    df["TR"] = TR  # utile SuperTrend/ADX
 
-    # ---------- StochRSI (basé sur prix, rapide & indicatif) ----------
-    low14 = low.rolling(14).min()
-    high14 = high.rolling(14).max()
-    df["StochRSI"] = ( (close - low14) / (high14 - low14) * 100 ).replace([np.inf, -np.inf], np.nan)
-
-    # ---------- ADX (Wilder) ----------
-    up_move   = high.diff()
-    down_move = -low.diff()
-    plus_dm  = np.where((up_move > 0) & (up_move > down_move), up_move, 0.0)
-    minus_dm = np.where((down_move > 0) & (down_move > up_move), down_move, 0.0)
-
+    # ADX simplifié
+    up_move, down_move = high.diff(), -low.diff()
+    plus_dm = np.where((up_move > 0) & (up_move > down_move), up_move, 0)
+    minus_dm = np.where((down_move > 0) & (down_move > up_move), down_move, 0)
     atr14 = df["ATR14"]
-    plus_di  = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / atr14
-    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / atr14
-    dx = 100 * ( (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) )
-    df["ADX"] = dx.ewm(alpha=1/14, adjust=False).mean()
-
-    # ---------- Ichimoku ----------
-    high_9 = high.rolling(9).max()
-    low_9  = low.rolling(9).min()
-    df["ICH_Tenkan"] = (high_9 + low_9) / 2
-
-    high_26 = high.rolling(26).max()
-    low_26  = low.rolling(26).min()
-    df["ICH_Kijun"] = (high_26 + low_26) / 2
-    df["ICH_SpanA"] = (df["ICH_Tenkan"] + df["ICH_Kijun"]) / 2
-    df["ICH_SpanB"] = (high.rolling(52).max() + low.rolling(52).min()) / 2
-
-    # ---------- OBV ----------
-    direction = np.sign(close.diff()).fillna(0)
-    df["OBV"] = (vol * direction).cumsum()
-
-    # ---------- MFI ----------
-    typical_price = (high + low + close) / 3
-    money_flow = typical_price * vol
-    pos_flow = np.where(typical_price > typical_price.shift(), money_flow, 0.0)
-    neg_flow = np.where(typical_price < typical_price.shift(), money_flow, 0.0)
-    pos_mf = pd.Series(pos_flow, index=df.index).rolling(14).sum()
-    neg_mf = pd.Series(neg_flow, index=df.index).rolling(14).sum().replace(0, np.nan)
-    df["MFI"] = 100 - (100 / (1 + (pos_mf / neg_mf)))
-
-    # ---------- SAR (simple proxy) ----------
-    df["SAR"] = close.rolling(3).min().shift(1)
-
-    # ---------- CCI ----------
-    tp = (high + low + close) / 3
-    df["CCI"] = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
-
-    # ---------- SuperTrend (simple) ----------
-    hl2 = (high + low) / 2
-    st_atr = df["ATR14"]
-    upper_band = hl2 + 3 * st_atr
-    lower_band = hl2 - 3 * st_atr
-    # Label uniquement (calcul complet de la ligne ST non inclus ici)
-    df["SuperTrend"] = np.where(close > lower_band, "Bull", "Bear")
-
-    # ---------- Donchian ----------
-    df["Donchian_High"] = high.rolling(20).max()
-    df["Donchian_Low"]  = low.rolling(20).min()
-
-    # ---------- MA200 ----------
-    df["MA200"] = close.rolling(200).mean()
-
-    # ---------- Pivot / R1 / S1 (classiques) ----------
-    df["Pivot"] = (high + low + close) / 3
-    df["R1"] = 2 * df["Pivot"] - low
-    df["S1"] = 2 * df["Pivot"] - high
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14).mean() / atr14
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14).mean() / atr14
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan))
+    df["ADX"] = dx.ewm(alpha=1/14).mean()
 
     return df
 
 # ======================================================
 # 🧮 Analyse multi-période
 # ======================================================
-ADV_KEYS = [
-    "RSI14","MACD","MACD_Signal","EMA20","EMA50",
-    "BB_Mid","BB_Upper","BB_Lower","Volume_Mean","VWAP",
-    "ATR14","StochRSI","ADX",
-    "ICH_Tenkan","ICH_Kijun","ICH_SpanA","ICH_SpanB",
-    "OBV","MFI","SAR","CCI","SuperTrend","Donchian_High","Donchian_Low","MA200",
-    "Pivot","R1","S1"
-]
-
 def summarize_last_row(df):
-    """Retourne un dict (valeurs dernière ligne) formaté + signaux lisibles."""
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
 
-    # Signaux lisibles
     trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
+    macd_signal = "📈 Bullish" if (prev["MACD"] < prev["MACD_Signal"]) and (last["MACD"] > last["MACD_Signal"]) else \
+                  "📉 Bearish" if (prev["MACD"] > prev["MACD_Signal"]) and (last["MACD"] < last["MACD_Signal"]) else "❌ Aucun"
+    bb_pos = "⬆️ Surachat" if last["close"] > last["BB_Upper"] else "⬇️ Survente" if last["close"] < last["BB_Lower"] else "〰️ Neutre"
 
-    if (prev["MACD"] < prev["MACD_Signal"]) and (last["MACD"] > last["MACD_Signal"]):
-        macd_signal = "📈 Bullish"
-    elif (prev["MACD"] > prev["MACD_Signal"]) and (last["MACD"] < last["MACD_Signal"]):
-        macd_signal = "📉 Bearish"
-    else:
-        macd_signal = "❌ Aucun"
-
-    if last["close"] > last["BB_Upper"]:
-        bb_pos = "⬆️ Surachat"
-    elif last["close"] < last["BB_Lower"]:
-        bb_pos = "⬇️ Survente"
-    else:
-        bb_pos = "〰️ Neutre"
-
-    vol_trend = "⬆️ Volume haussier" if last["volume"] > last["Volume_Mean"] else "⬇️ Volume baissier"
-
-    out = {
-        "RSI": safe_round(last["RSI14"]),
+    return {
+        "RSI14": safe_round(last["RSI14"]),
         "Trend": trend,
         "MACD_Cross": macd_signal,
-        "Bollinger_Pos": bb_pos,
-        "Volume_Sentiment": vol_trend,
+        "Bollinger_Pos": bb_pos
     }
-
-    # Ajouter toutes les valeurs numériques clés (arrondies)
-    for k in ADV_KEYS:
-        v = last.get(k, np.nan)
-        out[k] = safe_round(v) if k not in ["SuperTrend"] else (v if isinstance(v, str) else "N/A")
-
-    return out
 
 def analyze_symbol(symbol_pair):
-    periods = {
-        "1h": 3600,
-        "6h": 21600,
-        "1d": 86400
-    }
     results = {}
-
-    for label, gran in periods.items():
+    for label, gran in {"1h": 3600, "6h": 21600, "1d": 86400}.items():
         df = get_candles(symbol_pair, gran)
-        if df is None or len(df) < 60:
-            # Besoin d’un minimum d’historique pour MA200 / Ichimoku / ADX
-            print(f"⚠️ Historique insuffisant pour {symbol_pair} en {label}", flush=True)
-            continue
-        df = compute_indicators(df)
-        results[label] = summarize_last_row(df)
-
+        if df is not None and len(df) >= 60:
+            df = compute_indicators(df)
+            results[label] = summarize_last_row(df)
     if not results:
         return None
 
-    # Consensus simple basé sur trend EMA20/50
-    trends = [v.get("Trend") for v in results.values()]
-    bulls = trends.count("Bull")
-    bears = trends.count("Bear")
+    trends = [r["Trend"] for r in results.values()]
+    bulls, bears = trends.count("Bull"), trends.count("Bear")
     consensus = "🟢 Achat fort" if bulls >= 2 else "🔴 Vente forte" if bears >= 2 else "⚪ Neutre"
 
-    # Aplatir le dict
-    flat = {
-        "Crypto": symbol_pair.split("-")[0],
-        "Consensus": consensus,
-        "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
+    flat = {"Crypto": symbol_pair.split("-")[0], "Consensus": consensus, "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")}
     for tf, vals in results.items():
         for k, v in vals.items():
             flat[f"{k}_{tf}"] = v
     return flat
 
 # ======================================================
-# 📊 Mise à jour Google Sheets (avec ajout des indicateurs émotionnels)
+# 📊 Mise à jour Google Sheets (avec émotion par crypto)
 # ======================================================
 def update_sheet():
     try:
@@ -360,29 +230,19 @@ def update_sheet():
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="200", cols="120")
+            ws = sh.add_worksheet(title="MultiTF", rows="200", cols="200")
 
-        cryptos = [
-            "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
-            "ADA-USD", "DOGE-USD", "AVAX-USD", "XRP-USD",
-            "LINK-USD", "MATIC-USD"
-        ]
-
+        cryptos = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "ADA-USD", "DOGE-USD", "AVAX-USD", "XRP-USD", "LINK-USD", "MATIC-USD"]
         rows = []
 
-        # --- 1️⃣ Ajout d’une ligne “Sentiment Global”
-        sentiment = get_market_sentiment()
-        sentiment["Crypto"] = "🌎 Sentiment_Global"
-        sentiment["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        rows.append(sentiment)
-
-        # --- 2️⃣ Boucle sur cryptos
         for pair in cryptos:
             res = analyze_symbol(pair)
             if res:
+                sentiment = get_sentiment_for_symbol(pair)
+                res.update(sentiment)
                 rows.append(res)
                 print(f"✅ {res['Crypto']} → {res['Consensus']}", flush=True)
-            time.sleep(1.5)
+            time.sleep(2)
 
         if not rows:
             print("⚠️ Aucune donnée récupérée", flush=True)
@@ -391,7 +251,7 @@ def update_sheet():
         df_out = pd.DataFrame(rows)
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels !", flush=True)
+        print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels par crypto !", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
@@ -422,7 +282,7 @@ def keep_alive():
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D) — indicateurs avancés intégrés"
+    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D) — indicateurs avancés et émotionnels intégrés"
 
 @app.route("/run")
 def manual_run():
