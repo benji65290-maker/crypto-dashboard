@@ -12,7 +12,10 @@ from flask import Flask
 
 app = Flask(__name__)
 
-print("\U0001F512 Initialisation des credentials Google...", flush=True)
+# ======================================================
+# 🔐 Authentification Google Sheets
+# ======================================================
+print("🔐 Initialisation des credentials Google...", flush=True)
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -24,86 +27,231 @@ except Exception as e:
     print(f"❌ Erreur credentials Google : {e}", flush=True)
     raise SystemExit()
 
-# ===========================
-# API Coinbase OHLC
-# ===========================
+# ======================================================
+# ⚙️ Utilitaires
+# ======================================================
+def safe_round(x, n=2):
+    try:
+        if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+            return np.nan
+        return round(float(x), n)
+    except Exception:
+        return np.nan
+
+def ensure_numeric(df, cols):
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+# ======================================================
+# ⚙️ API Coinbase – Données OHLC
+# ======================================================
 def get_candles(symbol_pair, granularity):
+    """
+    Coinbase renvoie des lignes [time, low, high, open, close, volume]
+    time est en secondes (UTC). On trie par date croissante.
+    """
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles"
     params = {"granularity": granularity}
     headers = {"User-Agent": "CryptoBot/1.0"}
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r = requests.get(url, headers=headers, params=params, timeout=12)
         if r.status_code != 200:
-            print(f"\U0001F310 [{symbol_pair}] HTTP {r.status_code} ({granularity}s)", flush=True)
+            print(f"🌐 [{symbol_pair}] HTTP {r.status_code} ({granularity}s)", flush=True)
             return None
         data = r.json()
         if not data:
             return None
         df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-        df["time"] = pd.to_datetime(df["time"], unit="s")
-        df = df.sort_values("time")
+        df["time"]  = pd.to_datetime(df["time"], unit="s", utc=True)
+        df = df.sort_values("time").reset_index(drop=True)
+        df = ensure_numeric(df, ["low","high","open","close","volume"])
         return df
     except Exception as e:
         print(f"⚠️ Erreur get_candles({symbol_pair}, {granularity}): {e}", flush=True)
         return None
 
-# ===========================
-# Calculs indicateurs
-# ===========================
+# ======================================================
+# 📈 Calculs d’indicateurs techniques (base + avancés)
+# ======================================================
 def compute_indicators(df):
-    df = df.copy()
-    delta = df["close"].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    """
+    Calcule tous les indicateurs sur une copie du DataFrame (ne modifie pas l’original).
+    Les NaN initiales sont normales (périodes de chauffe).
+    """
+    if df is None or df.empty:
+        return df
 
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
+    df = df.copy()
+    close = df["close"]
+    high  = df["high"]
+    low   = df["low"]
+    vol   = df["volume"]
+
+    # ---------- RSI (Wilder) ----------
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = (-delta).clip(lower=0)
+    # Moyennes exponentielles avec alpha=1/14 => lissage de Wilder
+    roll_up = up.ewm(alpha=1/14, adjust=False).mean()
+    roll_down = down.ewm(alpha=1/14, adjust=False).mean()
+    rs = roll_up / roll_down.replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
 
-    ema12 = df["close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    # ---------- MACD ----------
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
+    # ---------- EMA Trend ----------
+    df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+    df["EMA50"] = close.ewm(span=50, adjust=False).mean()
 
-    df["BB_Mid"] = df["close"].rolling(20).mean()
-    df["BB_Std"] = df["close"].rolling(20).std()
-    df["BB_Upper"] = df["BB_Mid"] + 2 * df["BB_Std"]
-    df["BB_Lower"] = df["BB_Mid"] - 2 * df["BB_Std"]
+    # ---------- Bollinger ----------
+    bb_mid = close.rolling(20).mean()
+    bb_std = close.rolling(20).std()
+    df["BB_Mid"]   = bb_mid
+    df["BB_Upper"] = bb_mid + 2 * bb_std
+    df["BB_Lower"] = bb_mid - 2 * bb_std
 
-    df["Volume_Mean"] = df["volume"].rolling(20).mean()
-    df["VWAP"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
+    # ---------- Volume / VWAP ----------
+    df["Volume_Mean"] = vol.rolling(20).mean()
+    df["VWAP"] = (close * vol).cumsum() / vol.replace(0, np.nan).cumsum()
 
-    df["TR"] = pd.concat([
-        df["high"] - df["low"],
-        abs(df["high"] - df["close"].shift()),
-        abs(df["low"] - df["close"].shift())
-    ], axis=1).max(axis=1)
-    df["ATR14"] = df["TR"].rolling(14).mean()
+    # ---------- ATR (True Range + Wilder MA) ----------
+    prev_close = close.shift(1)
+    tr_components = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1)
+    TR = tr_components.max(axis=1)
+    # ATR Wilder
+    df["ATR14"] = TR.ewm(alpha=1/14, adjust=False).mean()
+    df["TR"] = TR  # utile SuperTrend/ADX
 
-    low14 = df["low"].rolling(window=14).min()
-    high14 = df["high"].rolling(window=14).max()
-    df["StochRSI"] = ((df["close"] - low14) / (high14 - low14)) * 100
+    # ---------- StochRSI (basé sur prix, rapide & indicatif) ----------
+    low14 = low.rolling(14).min()
+    high14 = high.rolling(14).max()
+    df["StochRSI"] = ( (close - low14) / (high14 - low14) * 100 ).replace([np.inf, -np.inf], np.nan)
 
-    plus_dm = df["high"].diff()
-    minus_dm = -df["low"].diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm < 0] = 0
+    # ---------- ADX (Wilder) ----------
+    up_move   = high.diff()
+    down_move = -low.diff()
+    plus_dm  = np.where((up_move > 0) & (up_move > down_move), up_move, 0.0)
+    minus_dm = np.where((down_move > 0) & (down_move > up_move), down_move, 0.0)
 
-    tr14 = df["TR"].rolling(14).sum()
-    plus_di = 100 * plus_dm.rolling(14).sum() / tr14
-    minus_di = 100 * minus_dm.rolling(14).sum() / tr14
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    df["ADX"] = dx.rolling(14).mean()
+    atr14 = df["ATR14"]
+    plus_di  = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / atr14
+    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / atr14
+    dx = 100 * ( (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) )
+    df["ADX"] = dx.ewm(alpha=1/14, adjust=False).mean()
+
+    # ---------- Ichimoku ----------
+    high_9 = high.rolling(9).max()
+    low_9  = low.rolling(9).min()
+    df["ICH_Tenkan"] = (high_9 + low_9) / 2
+
+    high_26 = high.rolling(26).max()
+    low_26  = low.rolling(26).min()
+    df["ICH_Kijun"] = (high_26 + low_26) / 2
+    df["ICH_SpanA"] = (df["ICH_Tenkan"] + df["ICH_Kijun"]) / 2
+    df["ICH_SpanB"] = (high.rolling(52).max() + low.rolling(52).min()) / 2
+
+    # ---------- OBV ----------
+    direction = np.sign(close.diff()).fillna(0)
+    df["OBV"] = (vol * direction).cumsum()
+
+    # ---------- MFI ----------
+    typical_price = (high + low + close) / 3
+    money_flow = typical_price * vol
+    pos_flow = np.where(typical_price > typical_price.shift(), money_flow, 0.0)
+    neg_flow = np.where(typical_price < typical_price.shift(), money_flow, 0.0)
+    pos_mf = pd.Series(pos_flow, index=df.index).rolling(14).sum()
+    neg_mf = pd.Series(neg_flow, index=df.index).rolling(14).sum().replace(0, np.nan)
+    df["MFI"] = 100 - (100 / (1 + (pos_mf / neg_mf)))
+
+    # ---------- SAR (simple proxy) ----------
+    df["SAR"] = close.rolling(3).min().shift(1)
+
+    # ---------- CCI ----------
+    tp = (high + low + close) / 3
+    df["CCI"] = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
+
+    # ---------- SuperTrend (simple) ----------
+    hl2 = (high + low) / 2
+    st_atr = df["ATR14"]
+    upper_band = hl2 + 3 * st_atr
+    lower_band = hl2 - 3 * st_atr
+    # Label uniquement (calcul complet de la ligne ST non inclus ici)
+    df["SuperTrend"] = np.where(close > lower_band, "Bull", "Bear")
+
+    # ---------- Donchian ----------
+    df["Donchian_High"] = high.rolling(20).max()
+    df["Donchian_Low"]  = low.rolling(20).min()
+
+    # ---------- MA200 ----------
+    df["MA200"] = close.rolling(200).mean()
+
+    # ---------- Pivot / R1 / S1 (classiques) ----------
+    df["Pivot"] = (high + low + close) / 3
+    df["R1"] = 2 * df["Pivot"] - low
+    df["S1"] = 2 * df["Pivot"] - high
 
     return df
 
-# ===========================
-# Analyse par symbole
-# ===========================
+# ======================================================
+# 🧮 Analyse multi-période
+# ======================================================
+ADV_KEYS = [
+    "RSI14","MACD","MACD_Signal","EMA20","EMA50",
+    "BB_Mid","BB_Upper","BB_Lower","Volume_Mean","VWAP",
+    "ATR14","StochRSI","ADX",
+    "ICH_Tenkan","ICH_Kijun","ICH_SpanA","ICH_SpanB",
+    "OBV","MFI","SAR","CCI","SuperTrend","Donchian_High","Donchian_Low","MA200",
+    "Pivot","R1","S1"
+]
+
+def summarize_last_row(df):
+    """Retourne un dict (valeurs dernière ligne) formaté + signaux lisibles."""
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+
+    # Signaux lisibles
+    trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
+
+    if (prev["MACD"] < prev["MACD_Signal"]) and (last["MACD"] > last["MACD_Signal"]):
+        macd_signal = "📈 Bullish"
+    elif (prev["MACD"] > prev["MACD_Signal"]) and (last["MACD"] < last["MACD_Signal"]):
+        macd_signal = "📉 Bearish"
+    else:
+        macd_signal = "❌ Aucun"
+
+    if last["close"] > last["BB_Upper"]:
+        bb_pos = "⬆️ Surachat"
+    elif last["close"] < last["BB_Lower"]:
+        bb_pos = "⬇️ Survente"
+    else:
+        bb_pos = "〰️ Neutre"
+
+    vol_trend = "⬆️ Volume haussier" if last["volume"] > last["Volume_Mean"] else "⬇️ Volume baissier"
+
+    out = {
+        "RSI": safe_round(last["RSI14"]),
+        "Trend": trend,
+        "MACD_Cross": macd_signal,
+        "Bollinger_Pos": bb_pos,
+        "Volume_Sentiment": vol_trend,
+    }
+
+    # Ajouter toutes les valeurs numériques clés (arrondies)
+    for k in ADV_KEYS:
+        v = last.get(k, np.nan)
+        out[k] = safe_round(v) if k not in ["SuperTrend"] else (v if isinstance(v, str) else "N/A")
+
+    return out
+
 def analyze_symbol(symbol_pair):
     periods = {
         "1h": 3600,
@@ -114,51 +262,43 @@ def analyze_symbol(symbol_pair):
 
     for label, gran in periods.items():
         df = get_candles(symbol_pair, gran)
-        if df is None or df.empty:
+        if df is None or len(df) < 60:
+            # Besoin d’un minimum d’historique pour MA200 / Ichimoku / ADX
+            print(f"⚠️ Historique insuffisant pour {symbol_pair} en {label}", flush=True)
             continue
         df = compute_indicators(df)
-        last = df.iloc[-1]
-
-        results[label] = {
-            "RSI": round(last.get("RSI14", np.nan), 2),
-            "Trend": "Bull" if last.get("EMA20", 0) > last.get("EMA50", 0) else "Bear",
-            "MACD": ("📈 Bullish" if df["MACD"].iloc[-2] < df["MACD_Signal"].iloc[-2] and last["MACD"] > last["MACD_Signal"]
-                      else "📉 Bearish" if df["MACD"].iloc[-2] > df["MACD_Signal"].iloc[-2] and last["MACD"] < last["MACD_Signal"]
-                      else "❌ Aucun"),
-            "Bollinger": ("⬆️ Surachat" if last["close"] > last["BB_Upper"]
-                          else "⬇️ Survente" if last["close"] < last["BB_Lower"]
-                          else "〰️ Neutre"),
-            "Volume": "⬆️ Volume haussier" if last["volume"] > last["Volume_Mean"] else "⬇️ Volume baissier",
-            "VWAP": round(last.get("VWAP", np.nan), 2),
-            "ATR": round(last.get("ATR14", np.nan), 2),
-            "ADX": round(last.get("ADX", np.nan), 2),
-            "StochRSI": round(last.get("StochRSI", np.nan), 2)
-        }
+        results[label] = summarize_last_row(df)
 
     if not results:
         return None
 
-    trends = [v["Trend"] for v in results.values()]
+    # Consensus simple basé sur trend EMA20/50
+    trends = [v.get("Trend") for v in results.values()]
     bulls = trends.count("Bull")
     bears = trends.count("Bear")
     consensus = "🟢 Achat fort" if bulls >= 2 else "🔴 Vente forte" if bears >= 2 else "⚪ Neutre"
 
-    out = {"Crypto": symbol_pair.split("-")[0], "Consensus": consensus, "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")}
-    for label, vals in results.items():
+    # Aplatir le dict
+    flat = {
+        "Crypto": symbol_pair.split("-")[0],
+        "Consensus": consensus,
+        "LastUpdate": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    for tf, vals in results.items():
         for k, v in vals.items():
-            out[f"{k}_{label}"] = v
-    return out
+            flat[f"{k}_{tf}"] = v
+    return flat
 
-# ===========================
-# Mise à jour Google Sheet
-# ===========================
+# ======================================================
+# 📊 Mise à jour Google Sheets
+# ======================================================
 def update_sheet():
     try:
         sh = gc.open_by_key(SHEET_ID)
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="40")
+            ws = sh.add_worksheet(title="MultiTF", rows="200", cols="120")
 
         cryptos = [
             "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
@@ -172,7 +312,7 @@ def update_sheet():
             if res:
                 rows.append(res)
                 print(f"✅ {res['Crypto']} → {res['Consensus']}", flush=True)
-            time.sleep(2)
+            time.sleep(1.2)  # petite pause anti-burst
 
         if not rows:
             print("⚠️ Aucune donnée récupérée", flush=True)
@@ -186,9 +326,9 @@ def update_sheet():
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
 
-# ===========================
-# Threads
-# ===========================
+# ======================================================
+# 🔁 Threads
+# ======================================================
 def run_bot():
     print("🚀 Lancement du bot Multi-Timeframe", flush=True)
     update_sheet()
@@ -202,23 +342,26 @@ def keep_alive():
     while True:
         try:
             requests.get(url, timeout=10)
-            print("💭 Ping keep-alive envoyé.", flush=True)
+            print("💤 Ping keep-alive envoyé.", flush=True)
         except Exception as e:
             print(f"⚠️ Erreur keep_alive : {e}", flush=True)
         time.sleep(600)
 
-# ===========================
-# Flask
-# ===========================
+# ======================================================
+# 🌐 Flask
+# ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D)"
+    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D) — indicateurs avancés intégrés"
 
 @app.route("/run")
 def manual_run():
     threading.Thread(target=update_sheet, daemon=True).start()
     return "🧠 Mise à jour manuelle lancée !"
 
+# ======================================================
+# 🧠 Lancement
+# ======================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     threading.Thread(target=run_bot, daemon=True).start()
