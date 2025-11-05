@@ -354,13 +354,17 @@ def analyze_symbol(symbol_pair):
 # ======================================================
 # 📊 Mise à jour Google Sheets (avec ajout des indicateurs émotionnels)
 # ======================================================
+
+# ======================================================
+# 📊 Mise à jour Google Sheets (corrigée et nettoyée)
+# ======================================================
 def update_sheet():
     try:
         sh = gc.open_by_key(SHEET_ID)
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="200", cols="120")
+            ws = sh.add_worksheet(title="MultiTF", rows="500", cols="250")
 
         cryptos = [
             "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
@@ -370,31 +374,65 @@ def update_sheet():
 
         rows = []
 
-        # --- 1️⃣ Ajout d’une ligne “Sentiment Global”
-        sentiment = get_market_sentiment()
-        sentiment["Crypto"] = "🌎 Sentiment_Global"
-        sentiment["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        rows.append(sentiment)
-
-        # --- 2️⃣ Boucle sur cryptos
         for pair in cryptos:
             res = analyze_symbol(pair)
-            if res:
-                rows.append(res)
-                print(f"✅ {res['Crypto']} → {res['Consensus']}", flush=True)
-            time.sleep(1.5)
+            if not res:
+                continue
+
+            symbol = pair.split("-")[0]
+            senti = get_sentiment_for_symbol(symbol)
+
+            # Reconstruction par timeframe pour scoring global
+            tfs = {}
+            for tf in ["1h","6h","1d"]:
+                tfs[tf] = {
+                    "RSI": res.get(f"RSI_{tf}"),
+                    "Trend": res.get(f"Trend_{tf}"),
+                    "MACD_Cross": res.get(f"MACD_Cross_{tf}"),
+                    "Bollinger_Pos": res.get(f"Bollinger_Pos_{tf}"),
+                    "Volume_Sentiment": res.get(f"Volume_Sentiment_{tf}"),
+                }
+
+            score_10, signal_global = compute_global_score(tfs, senti)
+
+            # Fusionner les données
+            flat = {"Crypto": res["Crypto"], "GlobalScore_0_10": score_10, "Signal_Global": signal_global}
+            flat["Consensus"] = res.get("Consensus")
+
+            # Ajouter les indicateurs techniques
+            for k, v in res.items():
+                if k in ["Crypto","Consensus","LastUpdate"]:
+                    continue
+                flat[k] = v
+
+            # Ajouter les sentiments avant LastUpdate
+            flat.update(senti)
+            flat["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            rows.append(flat)
+            print(f"✅ {symbol} → Score {score_10}/10 | {signal_global}", flush=True)
+            time.sleep(1.2)
 
         if not rows:
             print("⚠️ Aucune donnée récupérée", flush=True)
             return
 
         df_out = pd.DataFrame(rows)
+
+        # Réorganisation des colonnes
+        cols_front = ["Crypto","GlobalScore_0_10","Signal_Global","Consensus"]
+        sentiment_cols = ["FearGreed_Index","FearGreed_Label","Social_Sentiment","News_Intensity","Sentiment_Score","LastUpdate"]
+        remaining = [c for c in df_out.columns if c not in cols_front + sentiment_cols]
+        ordered = cols_front + remaining + sentiment_cols
+        df_out = df_out.reindex(columns=[c for c in ordered if c in df_out.columns])
+
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels !", flush=True)
+        print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels par crypto fusionnés et score global.", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
+
 
 # ======================================================
 # 🌍 Indicateurs de Sentiment & Émotion (par crypto)
@@ -574,6 +612,10 @@ def summarize_last_row(df):
 # ======================================================
 # 📊 Mise à jour Google Sheets (corrigée: par-crypto + score + émotions)
 # ======================================================
+
+# ======================================================
+# 📊 Mise à jour Google Sheets (corrigée et nettoyée)
+# ======================================================
 def update_sheet():
     try:
         sh = gc.open_by_key(SHEET_ID)
@@ -592,13 +634,13 @@ def update_sheet():
 
         for pair in cryptos:
             res = analyze_symbol(pair)
-            if not res: 
+            if not res:
                 continue
 
             symbol = pair.split("-")[0]
             senti = get_sentiment_for_symbol(symbol)
 
-            # reconstruire results_by_tf (limité aux clés "RSI, Trend, MACD_Cross, Bollinger_Pos, Volume_Sentiment")
+            # Reconstruction par timeframe pour scoring global
             tfs = {}
             for tf in ["1h","6h","1d"]:
                 tfs[tf] = {
@@ -611,21 +653,18 @@ def update_sheet():
 
             score_10, signal_global = compute_global_score(tfs, senti)
 
-            # Fusionner: placer GlobalScore après Crypto, sentiment avant LastUpdate
+            # Fusionner les données
             flat = {"Crypto": res["Crypto"], "GlobalScore_0_10": score_10, "Signal_Global": signal_global}
-            # Conserver consensus actuel
             flat["Consensus"] = res.get("Consensus")
 
-            # recopier toutes les colonnes techniques déjà présentes
+            # Ajouter les indicateurs techniques
             for k, v in res.items():
-                if k in ["Crypto","Consensus","LastUpdate"]: 
+                if k in ["Crypto","Consensus","LastUpdate"]:
                     continue
                 flat[k] = v
 
-            # Ajouter sentiments
+            # Ajouter les sentiments avant LastUpdate
             flat.update(senti)
-
-            # LastUpdate en dernier
             flat["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
             rows.append(flat)
@@ -636,23 +675,22 @@ def update_sheet():
             print("⚠️ Aucune donnée récupérée", flush=True)
             return
 
-        # Harmoniser l'ordre des colonnes: Crypto, GlobalScore, Signal_Global, Consensus, ... tout le reste ..., sentiments, LastUpdate
+        df_out = pd.DataFrame(rows)
+
+        # Réorganisation des colonnes
         cols_front = ["Crypto","GlobalScore_0_10","Signal_Global","Consensus"]
         sentiment_cols = ["FearGreed_Index","FearGreed_Label","Social_Sentiment","News_Intensity","Sentiment_Score","LastUpdate"]
-
-        # Construire DataFrame puis réordonner
-        df_out = pd.DataFrame(rows)
-        # bouger colonnes si présentes
         remaining = [c for c in df_out.columns if c not in cols_front + sentiment_cols]
         ordered = cols_front + remaining + sentiment_cols
         df_out = df_out.reindex(columns=[c for c in ordered if c in df_out.columns])
 
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour (techniques + émotions par crypto + score global).", flush=True)
+        print("✅ Feuille 'MultiTF' mise à jour avec indicateurs émotionnels par crypto fusionnés et score global.", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
+
 
 # ======================================================
 # 🔁 Threads
