@@ -44,6 +44,67 @@ def ensure_numeric(df, cols):
     return df
 
 # ======================================================
+# 🎨 Helpers lisibilité (pastilles + renommage colonnes)
+# ======================================================
+def _rsi_signal_label(val):
+    try:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "RSI N/A ⚪"
+        v = float(val)
+        if v < 30: return "RSI Achat 🟢"
+        if v > 70: return "RSI Vente 🔴"
+        return "RSI Neutre ⚪"
+    except Exception:
+        return "RSI N/A ⚪"
+
+def _trend_signal_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if s == "Bull": return "Tendance Bull 🟢"
+    if s == "Bear": return "Tendance Bear 🔴"
+    return "Tendance N/A ⚪"
+
+def _macd_cross_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Bullish" in s: return "MACD Cross Bullish 🟢"
+    if "Bearish" in s: return "MACD Cross Bearish 🔴"
+    return "MACD Cross Neutre ⚪"
+
+def _bollinger_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Survente" in s: return "Bollinger Survente 🟢"
+    if "Surachat" in s: return "Bollinger Surachat 🔴"
+    return "Bollinger Neutre ⚪"
+
+def _volume_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s).lower()
+    if "haussier" in s: return "Volume Haussier 🟢"
+    if "baissier" in s: return "Volume Baissier 🔴"
+    return "Volume Neutre ⚪"
+
+def _prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for c in df.columns:
+        new = str(c)
+        # timeframe suffixes
+        new = new.replace("_1h", " 1H").replace("_6h", " 6H").replace("_1d", " 1D")
+        new = new.replace("_1H", " 1H").replace("_6H", " 6H").replace("_1D", " 1D")
+        # readable replacements
+        new = new.replace("MACD_Cross", "MACD Cross")\
+                 .replace("Bollinger_Pos", "Bollinger Pos")\
+                 .replace("Volume_Sentiment", "Volume Sentiment")\
+                 .replace("LastUpdate", "Last Update")\
+                 .replace("GlobalScore_0_10", "Global Score (0-10)")\
+                 .replace("Signal_Global", "Signal Global")\
+                 .replace("FearGreed_Index", "Fear & Greed Index")\
+                 .replace("FearGreed_Label", "Fear & Greed Label")\
+                 .replace("News_Intensity", "News Intensity")\
+                 .replace("Sentiment_Score", "Sentiment Score")
+        new = re.sub(r"\s{2,}", " ", new).strip()
+        if new != c:
+            rename_map[c] = new
+    return df.rename(columns=rename_map)
+
+# ======================================================
 # 🌍 Indicateurs de Sentiment & Émotion
 # ======================================================
 def get_market_sentiment():
@@ -262,6 +323,67 @@ def compute_indicators(df):
     df["S1"] = 2 * df["Pivot"] - high
 
     return df
+
+# ======================================================
+# 🎨 Helpers lisibilité (pastilles + renommage colonnes)
+# ======================================================
+def _rsi_signal_label(val):
+    try:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "RSI N/A ⚪"
+        v = float(val)
+        if v < 30: return "RSI Achat 🟢"
+        if v > 70: return "RSI Vente 🔴"
+        return "RSI Neutre ⚪"
+    except Exception:
+        return "RSI N/A ⚪"
+
+def _trend_signal_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if s == "Bull": return "Tendance Bull 🟢"
+    if s == "Bear": return "Tendance Bear 🔴"
+    return "Tendance N/A ⚪"
+
+def _macd_cross_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Bullish" in s: return "MACD Cross Bullish 🟢"
+    if "Bearish" in s: return "MACD Cross Bearish 🔴"
+    return "MACD Cross Neutre ⚪"
+
+def _bollinger_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Survente" in s: return "Bollinger Survente 🟢"
+    if "Surachat" in s: return "Bollinger Surachat 🔴"
+    return "Bollinger Neutre ⚪"
+
+def _volume_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s).lower()
+    if "haussier" in s: return "Volume Haussier 🟢"
+    if "baissier" in s: return "Volume Baissier 🔴"
+    return "Volume Neutre ⚪"
+
+def _prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for c in df.columns:
+        new = str(c)
+        # timeframe suffixes
+        new = new.replace("_1h", " 1H").replace("_6h", " 6H").replace("_1d", " 1D")
+        new = new.replace("_1H", " 1H").replace("_6H", " 6H").replace("_1D", " 1D")
+        # readable replacements
+        new = new.replace("MACD_Cross", "MACD Cross")\
+                 .replace("Bollinger_Pos", "Bollinger Pos")\
+                 .replace("Volume_Sentiment", "Volume Sentiment")\
+                 .replace("LastUpdate", "Last Update")\
+                 .replace("GlobalScore_0_10", "Global Score (0-10)")\
+                 .replace("Signal_Global", "Signal Global")\
+                 .replace("FearGreed_Index", "Fear & Greed Index")\
+                 .replace("FearGreed_Label", "Fear & Greed Label")\
+                 .replace("News_Intensity", "News Intensity")\
+                 .replace("Sentiment_Score", "Sentiment Score")
+        new = re.sub(r"\s{2,}", " ", new).strip()
+        if new != c:
+            rename_map[c] = new
+    return df.rename(columns=rename_map)
 
 # ======================================================
 # 🧮 Analyse multi-période
