@@ -34,7 +34,7 @@ except Exception as e:
 # ======================================================
 # ⚙️ Utilitaires
 # ======================================================
-def safe_round(x, n=2):
+def safe_round(x, n=1):
     try:
         if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
             return np.nan
@@ -47,80 +47,192 @@ def ensure_numeric(df, cols):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
-# ======================================================
-# 🎨 Aides de lisibilité: labels/pastilles + renommage colonnes
-# ======================================================
-def _rsi_label(val):
+def pct(a, b):
     try:
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            return "N/A ⚪"
-        v = float(val)
-        if v < 30: return f"{v:.1f} 🟢 Achat"
-        if v > 70: return f"{v:.1f} 🔴 Vente"
-        return f"{v:.1f} ⚪ Neutre"
+        if b == 0 or b is None or (isinstance(b, float) and np.isnan(b)):
+            return np.nan
+        return (float(a) - float(b)) / float(b)
     except Exception:
-        return "N/A ⚪"
+        return np.nan
 
-def _trend_label(s):
-    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
-    if s == "Bull": return "Bull 🟢"
-    if s == "Bear": return "Bear 🔴"
-    return "N/A ⚪"
+# ======================================================
+# 🎨 Pastilles & Labels (palette unifiée 🟢🔵⚪🟠🔴)
+# ======================================================
+def dot_green(): return "🟢"
+def dot_blue():  return "🔵"
+def dot_white(): return "⚪"
+def dot_orange():return "🟠"
+def dot_red():   return "🔴"
 
-def _macd_cross_label(s):
-    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
-    if "Bullish" in s: return "📈 Bullish 🟢"
-    if "Bearish" in s: return "📉 Bearish 🔴"
-    return "❌ Aucun ⚪"
+def label_rsi(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return "N/A " + dot_white()
+    v = float(v)
+    if v < 30:       return f"{v:.1f} {dot_green()} Achat"
+    elif v < 45:     return f"{v:.1f} {dot_blue()} Léger rebond"
+    elif v <= 55:    return f"{v:.1f} {dot_white()} Neutre"
+    elif v <= 70:    return f"{v:.1f} {dot_orange()} Surachat modéré"
+    else:            return f"{v:.1f} {dot_red()} Vente"
 
-def _bollinger_label(s):
-    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
-    if "Survente" in s: return "⬇️ Survente 🟢"
-    if "Surachat" in s: return "⬆️ Surachat 🔴"
-    return "〰️ Neutre ⚪"
-
-def _volume_label(s):
-    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s).lower()
-    if "haussier" in s: return "⬆️ Haussier 🟢"
-    if "baissier" in s: return "⬇️ Baissier 🔴"
-    return "〰️ Neutre ⚪"
-
-def _signal_global_from_score(score):
+def label_macd_cross(macd, signal, prev_macd=None, prev_signal=None):
     try:
-        s = float(score)
+        macd = float(macd); signal = float(signal)
+        trend_up = None
+        if prev_macd is not None and prev_signal is not None:
+            trend_up = (macd - prev_macd) > (signal - prev_signal)
+        if macd > signal and (trend_up is True):
+            return f"📈 Bullish {dot_green()}"
+        if macd > signal:
+            return f"📈 Bullish {dot_blue()}"
+        if abs(macd - signal) <= 1e-6:
+            return f"❌ Aucun {dot_white()}"
+        if macd < signal and (trend_up is False):
+            return f"📉 Bearish {dot_red()}"
+        return f"📉 Bearish {dot_orange()}"
     except Exception:
-        return "⚪ Neutre"
-    if s > 8:  return "🟢 Achat fort"
-    if s > 6:  return "🔵 Achat modéré"
-    if s > 5:  return "⚪ Neutre"
-    if s > 3:  return "🟠 Vente modérée"
-    return "🔴 Vente forte"
+        return f"❌ Aucun {dot_white()}"
 
-def _prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Renomme les colonnes en libellés lisibles."""
-    rename_map = {}
-    for c in df.columns:
-        new = str(c)
-        # suffixes timeframe
-        new = new.replace("_1h", " 1H").replace("_6h", " 6H").replace("_1d", " 1D")
-        new = new.replace("_1H", " 1H").replace("_6H", " 6H").replace("_1D", " 1D")
-        # remplacements lisibles
-        new = new.replace("MACD_Cross", "MACD Cross")\
-                 .replace("Bollinger_Pos", "Bollinger Pos")\
-                 .replace("Volume_Sentiment", "Volume Sentiment")\
-                 .replace("LastUpdate", "Last Update")\
-                 .replace("GlobalScore_0_10", "Global Score (0-10)")\
-                 .replace("Signal_Global", "Signal Global")\
-                 .replace("FearGreed_Index", "Fear & Greed Index")\
-                 .replace("FearGreed_Label", "Fear & Greed Label")\
-                 .replace("News_Intensity", "News Intensity")\
-                 .replace("Sentiment_Score", "Sentiment Score")\
-                 .replace("Sentiment_Global", "Sentiment Global")\
-                 .replace("Close", "Close Price")
-        new = re.sub(r"\s{2,}", " ", new).strip()
-        if new != c:
-            rename_map[c] = new
-    return df.rename(columns=rename_map)
+def label_trend(ema20, ema50):
+    try:
+        ema20 = float(ema20); ema50 = float(ema50)
+        spread = pct(ema20, ema50)
+        if spread > 0.02:  return f"Bull {dot_green()}"
+        if spread > 0.0:   return f"Bull {dot_blue()}"
+        if abs(spread) <= 0.005: return f"Neutre {dot_white()}"
+        if spread > -0.02: return f"Bear {dot_orange()}"
+        return f"Bear {dot_red()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_bollinger(close, lower, upper):
+    try:
+        close = float(close); lower=float(lower); upper=float(upper)
+        if close < lower: return f"⬇️ Survente {dot_green()}"
+        if close <= lower * 1.02: return f"⬇️ Proche bas {dot_blue()}"
+        if lower < close < upper: return f"〰️ Neutre {dot_white()}"
+        if close >= upper * 0.98 and close <= upper: return f"⬆️ Proche haut {dot_orange()}"
+        if close > upper: return f"⬆️ Surachat {dot_red()}"
+        return f"〰️ Neutre {dot_white()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_volume(vol, vol_mean):
+    try:
+        vol=float(vol); vm=float(vol_mean)
+        if vol >= vm*1.30: return f"⬆️ Haussier {dot_green()}"
+        if vol >= vm*1.10: return f"⬆️ Léger {dot_blue()}"
+        if abs(vol-vm)/max(vm,1e-9) <= 0.1: return f"〰️ Normal {dot_white()}"
+        if vol > vm*0.70: return f"⬇️ Léger {dot_orange()}"
+        return f"⬇️ Faible {dot_red()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_close_vs_ema50(close, ema50):
+    try:
+        c=float(close); e=float(ema50)
+        spread = pct(c,e)
+        if spread > 0.02:  return f"{c:.1f} {dot_green()}"
+        if spread > 0.0:   return f"{c:.1f} {dot_blue()}"
+        if abs(spread) <= 0.005: return f"{c:.1f} {dot_white()}"
+        if spread > -0.02: return f"{c:.1f} {dot_orange()}"
+        return f"{c:.1f} {dot_red()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_adx(adx):
+    try:
+        a=float(adx)
+        if a > 40:   return f"{a:.1f} {dot_red()} Fort (fin de cycle?)"
+        if a >= 25:  return f"{a:.1f} {dot_green()} Solide"
+        if a >= 20:  return f"{a:.1f} {dot_blue()} Début tendance"
+        if a >= 15:  return f"{a:.1f} {dot_white()} Faible"
+        return f"{a:.1f} {dot_orange()} Sans direction"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_mfi(mfi):
+    try:
+        m=float(mfi)
+        if m < 20:   return f"{m:.1f} {dot_green()} Survente"
+        if m < 40:   return f"{m:.1f} {dot_blue()} Rebond"
+        if m <= 60:  return f"{m:.1f} {dot_white()} Neutre"
+        if m <= 80:  return f"{m:.1f} {dot_orange()} Surachat mod."
+        return f"{m:.1f} {dot_red()} Surachat"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_cci(cci):
+    try:
+        c=float(cci)
+        if c < -100:  return f"{c:.0f} {dot_green()} Survente"
+        if c < 0:     return f"{c:.0f} {dot_blue()} Rebond"
+        if c <= 100:  return f"{c:.0f} {dot_white()} Neutre"
+        if c <= 200:  return f"{c:.0f} {dot_orange()} Surachat mod."
+        return f"{c:.0f} {dot_red()} Surachat"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_atr(atr, atr_ma):
+    try:
+        a=float(atr); ma=float(atr_ma) if atr_ma is not None else np.nan
+        if np.isnan(ma): 
+            return f"{a:.2f} {dot_white()}"
+        if a >= ma*2.0:   return f"{a:.2f} {dot_red()} Vol. excessive"
+        if a > ma:        return f"{a:.2f} {dot_orange()} Vol. forte"
+        if abs(a-ma)/max(ma,1e-9) <= 0.1: return f"{a:.2f} {dot_white()} Normale"
+        return f"{a:.2f} {dot_green()} Compression"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_obv(delta):
+    try:
+        d=float(delta)
+        if d > 0:   return f"{d:.0f} {dot_green()} Achat"
+        if d == 0:  return f"{d:.0f} {dot_white()} Stable"
+        return f"{d:.0f} {dot_red()} Vente"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_supertrend(v):
+    s = "" if v is None else str(v)
+    if "Bull" in s: return f"Bull {dot_green()}"
+    if "Bear" in s: return f"Bear {dot_red()}"
+    return f"N/A {dot_white()}"
+
+def label_ichimoku(tenkan, kijun):
+    try:
+        t=float(tenkan); k=float(kijun)
+        if t > k:     return f"Tenkan>Kijun {dot_green()}"
+        if abs(t-k)/max(abs(k),1e-9) <= 0.005: return f"≈ {dot_white()}"
+        return f"Tenkan<Kijun {dot_red()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_donchian(close, high, low):
+    try:
+        c=float(close); h=float(high); l=float(low)
+        if c > h:  return f"Rupture haut {dot_green()}"
+        if c < l:  return f"Cassure bas {dot_red()}"
+        return f"Range {dot_white()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_pivot(close, r1, s1):
+    try:
+        c=float(close); r=float(r1); s=float(s1)
+        if c > r:  return f">{r1:.1f} {dot_red()} Surachat"
+        if c < s:  return f"<{s1:.1f} {dot_green()} Survente"
+        return f"Dans range {dot_white()}"
+    except Exception:
+        return f"N/A {dot_white()}"
+
+def label_ma200(close, ma200):
+    try:
+        c=float(close); m=float(ma200)
+        if c > m:   return f"{c:.1f} {dot_green()} LT+ "
+        if abs(c-m)/max(m,1e-9) <= 0.005: return f"{c:.1f} {dot_white()} ≈MA200"
+        return f"{c:.1f} {dot_red()} LT- "
+    except Exception:
+        return f"N/A {dot_white()}"
 
 # ======================================================
 # ⚖️ Scoring "pro trader" (pondérations)
@@ -144,29 +256,46 @@ def _score_from_rsi(v):
     if r > 70: return 0.0
     return 1.0 - (r - 30) / 40.0  # 30->1 ; 70->0
 
-def _score_from_trend(s):
-    s = "" if s is None else str(s)
-    if s == "Bull": return 1.0
-    if s == "Bear": return 0.0
-    return 0.5
+def _score_from_trend(ema20, ema50):
+    try:
+        spread = pct(ema20, ema50)
+        if np.isnan(spread): return 0.5
+        if spread > 0.02:  return 1.0
+        if spread > 0.0:   return 0.7
+        if abs(spread) <= 0.005: return 0.5
+        if spread > -0.02: return 0.3
+        return 0.0
+    except Exception:
+        return 0.5
 
-def _score_from_macd(s):
-    s = "" if s is None else str(s)
-    if "Bullish" in s: return 1.0
-    if "Bearish" in s: return 0.0
-    return 0.5
+def _score_from_macd(macd, signal):
+    try:
+        macd = float(macd); signal=float(signal)
+        if macd > signal: return 0.8
+        if abs(macd-signal) <= 1e-6: return 0.5
+        return 0.2
+    except Exception:
+        return 0.5
 
-def _score_from_bb(s):
-    s = "" if s is None else str(s)
-    if "Survente" in s: return 1.0
-    if "Surachat" in s: return 0.0
-    return 0.5
+def _score_from_bb(close, lower, upper):
+    try:
+        c=float(close); l=float(lower); u=float(upper)
+        if c < l:  return 1.0
+        if c > u:  return 0.0
+        return 0.5
+    except Exception:
+        return 0.5
 
-def _score_from_vol(s):
-    s = "" if s is None else str(s).lower()
-    if "haussier" in s: return 1.0
-    if "baissier" in s: return 0.0
-    return 0.5
+def _score_from_vol(vol, mean):
+    try:
+        vol=float(vol); mean=float(mean)
+        if vol >= mean*1.3: return 0.8
+        if vol >= mean*1.1: return 0.65
+        if abs(vol-mean)/max(mean,1e-9) <= 0.1: return 0.5
+        if vol > mean*0.7: return 0.35
+        return 0.2
+    except Exception:
+        return 0.5
 
 def _score_from_sentiment(sentiment_dict):
     if not isinstance(sentiment_dict, dict): return 0.5
@@ -183,15 +312,26 @@ def _score_from_sentiment(sentiment_dict):
     v = max(0.0, min(100.0, v))
     return v / 100.0
 
+def _signal_global_from_score(score):
+    try:
+        s = float(score)
+    except Exception:
+        return "⚪ Neutre"
+    if s > 8:  return "🟢 Achat fort"
+    if s > 6:  return "🔵 Achat modéré"
+    if s > 5:  return "⚪ Neutre"
+    if s > 3:  return "🟠 Vente modérée"
+    return "🔴 Vente forte"
+
 def compute_global_score(tfs: dict, senti: dict):
     score_components = []
     for tf, wtf in _W_TF.items():
         vals = tfs.get(tf, {}) if isinstance(tfs, dict) else {}
         s_rsi   = _score_from_rsi(vals.get("RSI"))
-        s_trend = _score_from_trend(vals.get("Trend"))
-        s_macd  = _score_from_macd(vals.get("MACD_Cross"))
-        s_bb    = _score_from_bb(vals.get("Bollinger_Pos"))
-        s_vol   = _score_from_vol(vals.get("Volume_Sentiment"))
+        s_trend = _score_from_trend(vals.get("EMA20"), vals.get("EMA50"))
+        s_macd  = _score_from_macd(vals.get("MACD"), vals.get("MACD_Signal"))
+        s_bb    = _score_from_bb(vals.get("Close"), vals.get("BB_Lower"), vals.get("BB_Upper"))
+        s_vol   = _score_from_vol(vals.get("Volume"), vals.get("Volume_Mean"))
         s_tf = (s_rsi * _W_RSI + s_trend * _W_TREND + s_macd * _W_MACD + s_bb * _W_BB + s_vol * _W_VOL)
         score_components.append(s_tf * wtf)
     s_senti = _score_from_sentiment(senti) * _W_SENTI
@@ -203,19 +343,6 @@ def compute_global_score(tfs: dict, senti: dict):
 # ======================================================
 # 🌍 Sentiments par crypto
 # ======================================================
-COINGECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-    "ADA": "cardano",
-    "DOGE": "dogecoin",
-    "AVAX": "avalanche-2",
-    "XRP": "ripple",
-    "LINK": "chainlink",
-    "MATIC": "matic-network",
-}
-
 def get_sentiment_for_symbol(symbol: str) -> dict:
     try:
         # Fear & Greed global
@@ -318,7 +445,7 @@ def get_candles(symbol_pair, granularity):
         return None
 
 # ======================================================
-# 📈 Calculs d’indicateurs techniques
+# 📈 Calculs d’indicateurs techniques (base + avancés)
 # ======================================================
 def compute_indicators(df):
     if df is None or df.empty: return df
@@ -358,14 +485,12 @@ def compute_indicators(df):
     df["Volume_Mean"] = vol.rolling(20).mean()
     df["VWAP"] = (close * vol).cumsum() / vol.replace(0, np.nan).cumsum()
 
-    # ATR / TR
+    # ATR / TR + MA20 d'ATR
     prev_close = close.shift(1)
-    tr_components = pd.concat([
-        (high - low), (high - prev_close).abs(), (low - prev_close).abs()
-    ], axis=1)
+    tr_components = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1)
     TR = tr_components.max(axis=1)
     df["ATR14"] = TR.ewm(alpha=1/14, adjust=False).mean()
-    df["TR"] = TR
+    df["ATR14_MA20"] = df["ATR14"].rolling(20).mean()
 
     # StochRSI proxy
     low14 = low.rolling(14).min()
@@ -391,9 +516,10 @@ def compute_indicators(df):
     df["ICH_SpanA"] = (df["ICH_Tenkan"] + df["ICH_Kijun"]) / 2
     df["ICH_SpanB"] = (high.rolling(52).max() + low.rolling(52).min()) / 2
 
-    # OBV
+    # OBV + delta
     direction = np.sign(close.diff()).fillna(0)
     df["OBV"] = (vol * direction).cumsum()
+    df["OBV_Delta"] = df["OBV"].diff()
 
     # MFI
     typical_price = (high + low + close) / 3
@@ -432,82 +558,114 @@ def compute_indicators(df):
 
     return df
 
-ADV_KEYS = [
-    "RSI14","MACD","MACD_Signal","EMA20","EMA50",
-    "BB_Mid","BB_Upper","BB_Lower","Volume_Mean","VWAP",
-    "ATR14","StochRSI","ADX",
-    "ICH_Tenkan","ICH_Kijun","ICH_SpanA","ICH_SpanB",
-    "OBV","MFI","SAR","CCI","SuperTrend","Donchian_High","Donchian_Low","MA200",
-    "Pivot","R1","S1"
-]
-
+# ======================================================
+# 🧮 Résumé dernière ligne (par timeframe)
+# ======================================================
 def summarize_last_row(df):
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
 
-    trend = "Bull" if last["EMA20"] > last["EMA50"] else "Bear"
-    if (prev["MACD"] < prev["MACD_Signal"]) and (last["MACD"] > last["MACD_Signal"]):
-        macd_signal = "📈 Bullish"
-    elif (prev["MACD"] > prev["MACD_Signal"]) and (last["MACD"] < last["MACD_Signal"]):
-        macd_signal = "📉 Bearish"
-    else:
-        macd_signal = "❌ Aucun"
-
-    if last["close"] > last["BB_Upper"]:
-        bb_pos = "⬆️ Surachat"
-    elif last["close"] < last["BB_Lower"]:
-        bb_pos = "⬇️ Survente"
-    else:
-        bb_pos = "〰️ Neutre"
-
-    vol_trend = "⬆️ Haussier" if last["volume"] > last["Volume_Mean"] else "⬇️ Baissier"
-
     out = {
         "Close": safe_round(last["close"]),
+        "Volume": safe_round(last["volume"]),
         "RSI": safe_round(last["RSI14"]),
-        "Trend": trend,
-        "MACD_Cross": macd_signal,
-        "Bollinger_Pos": bb_pos,
-        "Volume_Sentiment": vol_trend,
+        "MACD": safe_round(last["MACD"]),
+        "MACD_Signal": safe_round(last["MACD_Signal"]),
+        "EMA20": safe_round(last["EMA20"]),
+        "EMA50": safe_round(last["EMA50"]),
+        "BB_Lower": safe_round(last["BB_Lower"]),
+        "BB_Upper": safe_round(last["BB_Upper"]),
+        "Volume_Mean": safe_round(last["Volume_Mean"]),
+        "ATR14": safe_round(last["ATR14"], 2),
+        "ATR14_MA20": safe_round(last.get("ATR14_MA20", np.nan), 2),
+        "ADX": safe_round(last["ADX"]),
+        "ICH_Tenkan": safe_round(last["ICH_Tenkan"]),
+        "ICH_Kijun": safe_round(last["ICH_Kijun"]),
+        "ICH_SpanA": safe_round(last["ICH_SpanA"]),
+        "ICH_SpanB": safe_round(last["ICH_SpanB"]),
+        "OBV": safe_round(last["OBV"], 0),
+        "OBV_Delta": safe_round(last.get("OBV_Delta", np.nan), 0),
+        "MFI": safe_round(last["MFI"]),
+        "SAR": safe_round(last["SAR"]),
+        "CCI": safe_round(last["CCI"], 0),
+        "SuperTrend": last["SuperTrend"] if isinstance(last["SuperTrend"], str) else "N/A",
+        "Donchian_High": safe_round(last["Donchian_High"]),
+        "Donchian_Low": safe_round(last["Donchian_Low"]),
+        "MA200": safe_round(last["MA200"]),
+        "Pivot": safe_round(last["Pivot"]),
+        "R1": safe_round(last["R1"]),
+        "S1": safe_round(last["S1"]),
+        "_prev_MACD": safe_round(prev["MACD"]) if "MACD" in df.columns else np.nan,
+        "_prev_Signal": safe_round(prev["MACD_Signal"]) if "MACD_Signal" in df.columns else np.nan,
     }
-    for k in ADV_KEYS:
-        v = last.get(k, np.nan)
-        out[k] = safe_round(v) if k != "SuperTrend" else (v if isinstance(v, str) else "N/A")
     return out
 
+# ======================================================
+# 🔎 Analyse d’un symbole (1h/6h/1d)
+# ======================================================
 def analyze_symbol(symbol_pair):
     periods = {"1h": 3600, "6h": 21600, "1d": 86400}
-    results = {}
+    data = {}
     for label, gran in periods.items():
         df = get_candles(symbol_pair, gran)
         if df is None or len(df) < 60:
             print(f"⚠️ Historique insuffisant pour {symbol_pair} en {label}", flush=True)
             continue
         df = compute_indicators(df)
-        results[label] = summarize_last_row(df)
-    if not results:
+        data[label] = summarize_last_row(df)
+    if not data:
         return None
 
-    # Consensus simple EMA20/EMA50
-    trends = [v.get("Trend") for v in results.values()]
-    bulls = trends.count("Bull")
-    bears = trends.count("Bear")
-    consensus = "🟢 Achat fort" if bulls >= 2 else "🔴 Vente forte" if bears >= 2 else "⚪ Neutre"
+    flat = {"Crypto": symbol_pair.split("-")[0]}
 
-    flat = {"Crypto": symbol_pair.split("-")[0], "Consensus": consensus}
-    for tf, vals in results.items():
-        for k, v in vals.items():
-            flat[f"{k}_{tf}"] = v
-        # vues colorées
-        flat[f"RSI_{tf}_View"] = _rsi_label(vals.get("RSI"))
-        flat[f"Trend_{tf}_View"] = _trend_label(vals.get("Trend"))
-        flat[f"MACD_Cross_{tf}_View"] = _macd_cross_label(vals.get("MACD_Cross"))
-        flat[f"Bollinger_Pos_{tf}_View"] = _bollinger_label(vals.get("Bollinger_Pos"))
-        flat[f"Volume_Sentiment_{tf}_View"] = _volume_label(vals.get("Volume_Sentiment"))
+    # Consensus simple EMA20/EMA50
+    tf_trends = []
+    for tf, vals in data.items():
+        tf_trends.append(1 if (vals.get("EMA20", np.nan) > vals.get("EMA50", np.nan)) else -1)
+    score_trend = sum([1 for v in tf_trends if v == 1]) - sum([1 for v in tf_trends if v == -1])
+    consensus = "🟢 Achat fort" if score_trend >= 2 else "🔴 Vente forte" if score_trend <= -2 else "⚪ Neutre"
+    flat["Consensus"] = consensus
+
+    # FUSION
+    def add_tf_cols(tf, v):
+        flat[f"RSI {tf.upper()}"] = label_rsi(v.get("RSI"))
+        flat[f"Trend {tf.upper()}"] = label_trend(v.get("EMA20"), v.get("EMA50"))
+        flat[f"MACD Cross {tf.upper()}"] = label_macd_cross(v.get("MACD"), v.get("MACD_Signal"), v.get("_prev_MACD"), v.get("_prev_Signal"))
+        flat[f"Bollinger Pos {tf.upper()}"] = label_bollinger(v.get("Close"), v.get("BB_Lower"), v.get("BB_Upper"))
+        flat[f"Volume Sentiment {tf.upper()}"] = label_volume(v.get("Volume"), v.get("Volume_Mean"))
+        flat[f"Close Price {tf.upper()}"] = label_close_vs_ema50(v.get("Close"), v.get("EMA50"))
+
+        flat[f"ADX {tf.upper()}"] = label_adx(v.get("ADX"))
+        flat[f"ATR {tf.upper()}"] = label_atr(v.get("ATR14"), v.get("ATR14_MA20"))
+        flat[f"MFI {tf.upper()}"] = label_mfi(v.get("MFI"))
+        flat[f"CCI {tf.upper()}"] = label_cci(v.get("CCI"))
+        flat[f"OBV Δ {tf.upper()}"] = label_obv(v.get("OBV_Delta"))
+        flat[f"SuperTrend {tf.upper()}"] = label_supertrend(v.get("SuperTrend"))
+        flat[f"Ichimoku {tf.upper()}"] = label_ichimoku(v.get("ICH_Tenkan"), v.get("ICH_Kijun"))
+        flat[f"Donchian {tf.upper()}"] = label_donchian(v.get("Close"), v.get("Donchian_High"), v.get("Donchian_Low"))
+        flat[f"Pivot Zone {tf.upper()}"] = label_pivot(v.get("Close"), v.get("R1"), v.get("S1"))
+        flat[f"MA200 {tf.upper()}"] = label_ma200(v.get("Close"), v.get("MA200"))
+
+        # RAW pour scoring
+        flat[f"_RAW_RSI_{tf}"] = v.get("RSI")
+        flat[f"_RAW_EMA20_{tf}"] = v.get("EMA20")
+        flat[f"_RAW_EMA50_{tf}"] = v.get("EMA50")
+        flat[f"_RAW_MACD_{tf}"] = v.get("MACD")
+        flat[f"_RAW_SIG_{tf}"] = v.get("MACD_Signal")
+        flat[f"_RAW_BBLOW_{tf}"] = v.get("BB_Lower")
+        flat[f"_RAW_BBUP_{tf}"] = v.get("BB_Upper")
+        flat[f"_RAW_CLOSE_{tf}"] = v.get("Close")
+        flat[f"_RAW_VOL_{tf}"] = v.get("Volume")
+        flat[f"_RAW_VOLMEAN_{tf}"] = v.get("Volume_Mean")
+
+    for tf in ["1h","6h","1d"]:
+        if tf in data:
+            add_tf_cols(tf, data[tf])
+
     return flat
 
 # ======================================================
-# 📊 Mise à jour Google Sheets (par-crypto, sentiments en colonnes)
+# 📊 Mise à jour Google Sheets
 # ======================================================
 def update_sheet():
     try:
@@ -529,29 +687,46 @@ def update_sheet():
             symbol = pair.split("-")[0]
             senti = get_sentiment_for_symbol(symbol)
 
-            # reconstruire bloc tfs minimal pour scoring
+            # Scoring global basé sur _RAW_*
             tfs = {}
             for tf in ["1h","6h","1d"]:
-                tfs[tf] = {
-                    "RSI": res.get(f"RSI_{tf}"),
-                    "Trend": res.get(f"Trend_{tf}"),
-                    "MACD_Cross": res.get(f"MACD_Cross_{tf}"),
-                    "Bollinger_Pos": res.get(f"Bollinger_Pos_{tf}"),
-                    "Volume_Sentiment": res.get(f"Volume_Sentiment_{tf}"),
-                }
+                if f"_RAW_RSI_{tf}" in res:
+                    tfs[tf] = {
+                        "RSI": res.get(f"_RAW_RSI_{tf}"),
+                        "EMA20": res.get(f"_RAW_EMA20_{tf}"),
+                        "EMA50": res.get(f"_RAW_EMA50_{tf}"),
+                        "MACD": res.get(f"_RAW_MACD_{tf}"),
+                        "MACD_Signal": res.get(f"_RAW_SIG_{tf}"),
+                        "Close": res.get(f"_RAW_CLOSE_{tf}"),
+                        "BB_Lower": res.get(f"_RAW_BBLOW_{tf}"),
+                        "BB_Upper": res.get(f"_RAW_BBUP_{tf}"),
+                        "Volume": res.get(f"_RAW_VOL_{tf}"),
+                        "Volume_Mean": res.get(f"_RAW_VOLMEAN_{tf}"),
+                    }
 
             score_10, signal_global = compute_global_score(tfs, senti)
 
-            flat = {"Crypto": res["Crypto"], "GlobalScore_0_10": score_10, "Signal_Global": signal_global, "Consensus": res.get("Consensus")}
-            # recopier techniques + vues
+            # Ligne exportée (sans _RAW_*)
+            flat = {"Crypto": res["Crypto"],
+                    "Global Score (0-10)": score_10,
+                    "Signal Global": signal_global,
+                    "Consensus": res.get("Consensus")}
+
             for k, v in res.items():
+                if k.startswith("_RAW_"): 
+                    continue
                 if k in ["Crypto","Consensus"]:
                     continue
                 flat[k] = v
-            # sentiments en colonnes
-            flat.update(senti)
-            flat["Sentiment_Global"] = _sentiment_global_label(senti)
-            flat["LastUpdate"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            # Sentiments
+            flat["Fear & Greed Index"] = senti.get("FearGreed_Index")
+            flat["Fear & Greed Label"] = senti.get("FearGreed_Label")
+            flat["Social Sentiment"] = senti.get("Social_Sentiment")
+            flat["News Intensity"] = senti.get("News_Intensity")
+            flat["Sentiment Score"] = senti.get("Sentiment_Score")
+            flat["Sentiment Global"] = _sentiment_global_label(senti)
+            flat["Last Update"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
             rows.append(flat)
             time.sleep(1.0)
@@ -562,36 +737,29 @@ def update_sheet():
 
         df_out = pd.DataFrame(rows)
 
-        # ----- Ordre de colonnes lisible
-        cols_front = ["Crypto","GlobalScore_0_10","Signal_Global","Consensus"]
+        # Ordre de colonnes lisible
+        cols_front = ["Crypto","Global Score (0-10)","Signal Global","Consensus"]
 
-        def _order_block(indic):
+        def _order_by_family(prefix):
             out = []
-            for tf in ["1h","6h","1d"]:
-                num = f"{indic}_{tf}"
-                view = f"{indic}_{tf}_View"
-                if num in df_out.columns: out.append(num)
-                if view in df_out.columns: out.append(view)
+            for tf in ["1H","6H","1D"]:
+                col = f"{prefix} {tf}"
+                if col in df_out.columns: out.append(col)
             return out
 
-        ordered_blocks = []
-        for indic in ["RSI","Trend","MACD_Cross","Bollinger_Pos","Volume_Sentiment","Close"]:
-            ordered_blocks += _order_block(indic)
+        ordered = cols_front
+        for family in ["RSI","Trend","MACD Cross","Bollinger Pos","Volume Sentiment","Close Price",
+                       "ADX","ATR","MFI","CCI","OBV Δ","SuperTrend","Ichimoku","Donchian","Pivot Zone","MA200"]:
+            ordered += _order_by_family(family)
 
-        used = set(cols_front + ordered_blocks)
-        emotion_cols = ["FearGreed_Index","FearGreed_Label","Social_Sentiment","News_Intensity","Sentiment_Score","Sentiment_Global","LastUpdate"]
-        remaining = [c for c in df_out.columns if c not in used and c not in emotion_cols]
-
-        ordered = cols_front + ordered_blocks + remaining + emotion_cols
-        ordered = [c for c in ordered if c in df_out.columns]
-        df_out = df_out.reindex(columns=ordered)
-
-        # Renommer colonnes en version lisible
-        df_out = _prettify_columns(df_out)
+        emotion_cols = ["Fear & Greed Index","Fear & Greed Label","Social Sentiment","News Intensity","Sentiment Score","Sentiment Global","Last Update"]
+        remaining = [c for c in df_out.columns if c not in ordered and c not in emotion_cols]
+        ordered += remaining + [c for c in emotion_cols if c in df_out.columns]
+        df_out = df_out.reindex(columns=[c for c in ordered if c in df_out.columns])
 
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour (lisible + pastilles + émotions par crypto).", flush=True)
+        print("✅ Feuille 'MultiTF' mise à jour : colonnes fusionnées + pastilles.", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
@@ -622,7 +790,7 @@ def keep_alive():
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe actif (1h / 6h / 1D) — lisible, pastilles, score global, émotions par crypto"
+    return "✅ Crypto Bot Multi-Timeframe actif — FULL FUSION + pastilles 🟢🔵⚪🟠🔴"
 
 @app.route("/run")
 def manual_run():
