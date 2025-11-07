@@ -44,6 +44,152 @@ def ensure_numeric(df, cols):
     return df
 
 # ======================================================
+# 🎨 Helpers: labels (fused with emojis), prettify headers, pro scoring
+# ======================================================
+def _rsi_label(val):
+    try:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "N/A ⚪"
+        v = float(val)
+        if v < 30: return f"{v:.2f} 🟢 Achat"
+        if v > 70: return f"{v:.2f} 🔴 Vente"
+        return f"{v:.2f} ⚪ Neutre"
+    except Exception:
+        return "N/A ⚪"
+
+def _trend_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if s == "Bull": return "Bull 🟢"
+    if s == "Bear": return "Bear 🔴"
+    return "N/A ⚪"
+
+def _macd_cross_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Bullish" in s: return "📈 Bullish 🟢"
+    if "Bearish" in s: return "📉 Bearish 🔴"
+    return "❌ Aucun ⚪"
+
+def _bollinger_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Survente" in s: return "⬇️ Survente 🟢"
+    if "Surachat" in s: return "⬆️ Surachat 🔴"
+    return "〰️ Neutre ⚪"
+
+def _volume_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s).lower()
+    if "haussier" in s: return "⬆️ Haussier 🟢"
+    if "baissier" in s: return "⬇️ Baissier 🔴"
+    return "〰️ Neutre ⚪"
+
+def _signal_global_from_score(score):
+    try:
+        s = float(score)
+    except Exception:
+        return "⚪ Neutre"
+    if s > 8:  return "🟢 Achat fort"
+    if s > 6:  return "🔵 Achat modéré"
+    if s > 5:  return "⚪ Neutre"
+    if s > 3:  return "🟠 Vente modérée"
+    return "🔴 Vente forte"
+
+def _prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for c in df.columns:
+        new = str(c)
+        new = new.replace("_1h", " 1H").replace("_6h", " 6H").replace("_1d", " 1D")
+        new = new.replace("_1H", " 1H").replace("_6H", " 6H").replace("_1D", " 1D")
+        new = new.replace("MACD_Cross", "MACD Cross")\
+                 .replace("Bollinger_Pos", "Bollinger Pos")\
+                 .replace("Volume_Sentiment", "Volume Sentiment")\
+                 .replace("LastUpdate", "Last Update")\
+                 .replace("GlobalScore_0_10", "Global Score (0-10)")\
+                 .replace("Signal_Global", "Signal Global")\
+                 .replace("FearGreed_Index", "Fear & Greed Index")\
+                 .replace("FearGreed_Label", "Fear & Greed Label")\
+                 .replace("News_Intensity", "News Intensity")\
+                 .replace("Sentiment_Score", "Sentiment Score")
+        new = re.sub(r"\s{2,}", " ", new).strip()
+        if new != c:
+            rename_map[c] = new
+    return df.rename(columns=rename_map)
+
+# ---- Pro Trader scoring ----
+_W_RSI = 0.15
+_W_TREND = 0.30
+_W_MACD = 0.25
+_W_BB = 0.10
+_W_VOL = 0.10
+_W_SENTI = 0.10
+
+_W_TF = {"1h": 0.20, "6h": 0.30, "1d": 0.50}
+
+def _score_from_rsi(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return 0.5
+    try:
+        r = float(v)
+    except Exception:
+        return 0.5
+    if r < 30: return 1.0
+    if r > 70: return 0.0
+    return 1.0 - (r - 30) / 40.0
+
+def _score_from_trend(s):
+    s = "" if s is None else str(s)
+    if s == "Bull": return 1.0
+    if s == "Bear": return 0.0
+    return 0.5
+
+def _score_from_macd(s):
+    s = "" if s is None else str(s)
+    if "Bullish" in s: return 1.0
+    if "Bearish" in s: return 0.0
+    return 0.5
+
+def _score_from_bb(s):
+    s = "" if s is None else str(s)
+    if "Survente" in s: return 1.0
+    if "Surachat" in s: return 0.0
+    return 0.5
+
+def _score_from_vol(s):
+    s = "" if s is None else str(s).lower()
+    if "haussier" in s: return 1.0
+    if "baissier" in s: return 0.0
+    return 0.5
+
+def _score_from_sentiment(sentiment_dict):
+    if not isinstance(sentiment_dict, dict): return 0.5
+    val = None
+    if "Sentiment_Score" in sentiment_dict and sentiment_dict["Sentiment_Score"] is not None:
+        val = sentiment_dict["Sentiment_Score"]
+    elif "FearGreed_Index" in sentiment_dict and sentiment_dict["FearGreed_Index"] is not None:
+        val = sentiment_dict["FearGreed_Index"]
+    if val is None: return 0.5
+    try:
+        v = float(val)
+    except Exception:
+        return 0.5
+    v = max(0.0, min(100.0, v))
+    return v / 100.0
+
+def compute_global_score(tfs: dict, senti: dict):
+    score_components = []
+    for tf, wtf in _W_TF.items():
+        vals = tfs.get(tf, {}) if isinstance(tfs, dict) else {}
+        s_rsi = _score_from_rsi(vals.get("RSI"))
+        s_trend = _score_from_trend(vals.get("Trend"))
+        s_macd = _score_from_macd(vals.get("MACD_Cross"))
+        s_bb = _score_from_bb(vals.get("Bollinger_Pos"))
+        s_vol = _score_from_vol(vals.get("Volume_Sentiment"))
+        s_tf = (s_rsi * _W_RSI + s_trend * _W_TREND + s_macd * _W_MACD + s_bb * _W_BB + s_vol * _W_VOL)
+        score_components.append(s_tf * wtf)
+    s_senti = _score_from_sentiment(senti) * _W_SENTI
+    total_0_1 = max(0.0, min(1.0, sum(score_components) + s_senti))
+    score_0_10 = round(total_0_1 * 10.0, 2)
+    signal = _signal_global_from_score(score_0_10)
+    return score_0_10, signal
+
+# ======================================================
 # 🎨 Helpers lisibilité (pastilles + renommage colonnes)
 # ======================================================
 def _rsi_signal_label(val):
@@ -323,6 +469,152 @@ def compute_indicators(df):
     df["S1"] = 2 * df["Pivot"] - high
 
     return df
+
+# ======================================================
+# 🎨 Helpers: labels (fused with emojis), prettify headers, pro scoring
+# ======================================================
+def _rsi_label(val):
+    try:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "N/A ⚪"
+        v = float(val)
+        if v < 30: return f"{v:.2f} 🟢 Achat"
+        if v > 70: return f"{v:.2f} 🔴 Vente"
+        return f"{v:.2f} ⚪ Neutre"
+    except Exception:
+        return "N/A ⚪"
+
+def _trend_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if s == "Bull": return "Bull 🟢"
+    if s == "Bear": return "Bear 🔴"
+    return "N/A ⚪"
+
+def _macd_cross_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Bullish" in s: return "📈 Bullish 🟢"
+    if "Bearish" in s: return "📉 Bearish 🔴"
+    return "❌ Aucun ⚪"
+
+def _bollinger_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s)
+    if "Survente" in s: return "⬇️ Survente 🟢"
+    if "Surachat" in s: return "⬆️ Surachat 🔴"
+    return "〰️ Neutre ⚪"
+
+def _volume_label(s):
+    s = "" if s is None or (isinstance(s, float) and np.isnan(s)) else str(s).lower()
+    if "haussier" in s: return "⬆️ Haussier 🟢"
+    if "baissier" in s: return "⬇️ Baissier 🔴"
+    return "〰️ Neutre ⚪"
+
+def _signal_global_from_score(score):
+    try:
+        s = float(score)
+    except Exception:
+        return "⚪ Neutre"
+    if s > 8:  return "🟢 Achat fort"
+    if s > 6:  return "🔵 Achat modéré"
+    if s > 5:  return "⚪ Neutre"
+    if s > 3:  return "🟠 Vente modérée"
+    return "🔴 Vente forte"
+
+def _prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for c in df.columns:
+        new = str(c)
+        new = new.replace("_1h", " 1H").replace("_6h", " 6H").replace("_1d", " 1D")
+        new = new.replace("_1H", " 1H").replace("_6H", " 6H").replace("_1D", " 1D")
+        new = new.replace("MACD_Cross", "MACD Cross")\
+                 .replace("Bollinger_Pos", "Bollinger Pos")\
+                 .replace("Volume_Sentiment", "Volume Sentiment")\
+                 .replace("LastUpdate", "Last Update")\
+                 .replace("GlobalScore_0_10", "Global Score (0-10)")\
+                 .replace("Signal_Global", "Signal Global")\
+                 .replace("FearGreed_Index", "Fear & Greed Index")\
+                 .replace("FearGreed_Label", "Fear & Greed Label")\
+                 .replace("News_Intensity", "News Intensity")\
+                 .replace("Sentiment_Score", "Sentiment Score")
+        new = re.sub(r"\s{2,}", " ", new).strip()
+        if new != c:
+            rename_map[c] = new
+    return df.rename(columns=rename_map)
+
+# ---- Pro Trader scoring ----
+_W_RSI = 0.15
+_W_TREND = 0.30
+_W_MACD = 0.25
+_W_BB = 0.10
+_W_VOL = 0.10
+_W_SENTI = 0.10
+
+_W_TF = {"1h": 0.20, "6h": 0.30, "1d": 0.50}
+
+def _score_from_rsi(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return 0.5
+    try:
+        r = float(v)
+    except Exception:
+        return 0.5
+    if r < 30: return 1.0
+    if r > 70: return 0.0
+    return 1.0 - (r - 30) / 40.0
+
+def _score_from_trend(s):
+    s = "" if s is None else str(s)
+    if s == "Bull": return 1.0
+    if s == "Bear": return 0.0
+    return 0.5
+
+def _score_from_macd(s):
+    s = "" if s is None else str(s)
+    if "Bullish" in s: return 1.0
+    if "Bearish" in s: return 0.0
+    return 0.5
+
+def _score_from_bb(s):
+    s = "" if s is None else str(s)
+    if "Survente" in s: return 1.0
+    if "Surachat" in s: return 0.0
+    return 0.5
+
+def _score_from_vol(s):
+    s = "" if s is None else str(s).lower()
+    if "haussier" in s: return 1.0
+    if "baissier" in s: return 0.0
+    return 0.5
+
+def _score_from_sentiment(sentiment_dict):
+    if not isinstance(sentiment_dict, dict): return 0.5
+    val = None
+    if "Sentiment_Score" in sentiment_dict and sentiment_dict["Sentiment_Score"] is not None:
+        val = sentiment_dict["Sentiment_Score"]
+    elif "FearGreed_Index" in sentiment_dict and sentiment_dict["FearGreed_Index"] is not None:
+        val = sentiment_dict["FearGreed_Index"]
+    if val is None: return 0.5
+    try:
+        v = float(val)
+    except Exception:
+        return 0.5
+    v = max(0.0, min(100.0, v))
+    return v / 100.0
+
+def compute_global_score(tfs: dict, senti: dict):
+    score_components = []
+    for tf, wtf in _W_TF.items():
+        vals = tfs.get(tf, {}) if isinstance(tfs, dict) else {}
+        s_rsi = _score_from_rsi(vals.get("RSI"))
+        s_trend = _score_from_trend(vals.get("Trend"))
+        s_macd = _score_from_macd(vals.get("MACD_Cross"))
+        s_bb = _score_from_bb(vals.get("Bollinger_Pos"))
+        s_vol = _score_from_vol(vals.get("Volume_Sentiment"))
+        s_tf = (s_rsi * _W_RSI + s_trend * _W_TREND + s_macd * _W_MACD + s_bb * _W_BB + s_vol * _W_VOL)
+        score_components.append(s_tf * wtf)
+    s_senti = _score_from_sentiment(senti) * _W_SENTI
+    total_0_1 = max(0.0, min(1.0, sum(score_components) + s_senti))
+    score_0_10 = round(total_0_1 * 10.0, 2)
+    signal = _signal_global_from_score(score_0_10)
+    return score_0_10, signal
 
 # ======================================================
 # 🎨 Helpers lisibilité (pastilles + renommage colonnes)
