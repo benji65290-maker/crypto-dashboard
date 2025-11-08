@@ -1,4 +1,4 @@
-# crypto_bot_multiTF_V5_1.py
+# crypto_bot_multiTF_V5_2.py
 import threading
 import time
 import requests
@@ -12,6 +12,9 @@ from gspread_dataframe import set_with_dataframe
 from flask import Flask
 from datetime import datetime
 import pytz
+
+# 🔎 Google Trends
+from pytrends.request import TrendReq
 
 app = Flask(__name__)
 
@@ -31,6 +34,8 @@ try:
 except Exception as e:
     print(f"❌ Erreur credentials Google : {e}", flush=True)
     raise SystemExit()
+
+CRYPTOPANIC_KEY = os.getenv("CRYPTOPANIC_KEY", "").strip()
 
 # ======================================================
 # ⚙️ Utilitaires
@@ -61,7 +66,7 @@ def now_paris_str():
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 # ======================================================
-# 🎨 Pastilles (uniquement)
+# 🎨 Pastilles
 # ======================================================
 def dot_green():  return "🟢"
 def dot_yellow(): return "🟡"
@@ -86,14 +91,12 @@ def label_macd_cross(macd, signal, prev_macd=None, prev_signal=None):
     try:
         macd = float(macd); signal = float(signal)
         if macd > signal:
-            # renforce si pente s'améliore vs signal
             if prev_macd is not None and prev_signal is not None:
                 if (macd - prev_macd) > (signal - prev_signal):
                     return f"{macd - signal:.2f} {dot_green()}"
             return f"{macd - signal:.2f} {dot_yellow()}"
         if abs(macd - signal) <= 1e-6:
             return f"0.00 {dot_white()}"
-        # macd < signal
         if prev_macd is not None and prev_signal is not None:
             if (macd - prev_macd) < (signal - prev_signal):
                 return f"{macd - signal:.2f} {dot_red()}"
@@ -248,8 +251,19 @@ def label_ma200(close, ma200):
     except Exception:
         return f"Insuffisant {dot_white()}"
 
+def label_actuality(score):
+    try:
+        s=float(score)
+    except Exception:
+        return f"Insuffisant {dot_white()}"
+    if s >= 70: return f"{s:.1f} {dot_green()}"
+    if s >= 50: return f"{s:.1f} {dot_yellow()}"
+    if s >= 40: return f"{s:.1f} {dot_white()}"
+    if s >= 25: return f"{s:.1f} {dot_orange()}"
+    return f"{s:.1f} {dot_red()}"
+
 # ======================================================
-# ⚖️ Scoring "pro trader" (pondérations) — inchangé
+# ⚖️ Scoring "pro trader"
 # ======================================================
 _W_RSI   = 0.15
 _W_TREND = 0.30
@@ -257,15 +271,14 @@ _W_MACD  = 0.25
 _W_BB    = 0.10
 _W_VOL   = 0.10
 _W_SENTI = 0.10
+_W_ACTUALITY = 0.10  # 👈 Nouveau facteur (10%)
 
 _W_TF = {"1h": 0.20, "6h": 0.30, "1d": 0.50}
 
 def _score_from_rsi(v):
     if v is None or (isinstance(v, float) and np.isnan(v)): return 0.5
-    try:
-        r = float(v)
-    except Exception:
-        return 0.5
+    try: r = float(v)
+    except: return 0.5
     if r < 30: return 1.0
     if r > 70: return 0.0
     return 1.0 - (r - 30) / 40.0
@@ -319,25 +332,21 @@ def _score_from_sentiment(sentiment_dict):
     elif "FearGreed_Index" in sentiment_dict and sentiment_dict["FearGreed_Index"] is not None:
         val = sentiment_dict["FearGreed_Index"]
     if val is None: return 0.5
-    try:
-        v = float(val)
-    except Exception:
-        return 0.5
+    try: v = float(val)
+    except: return 0.5
     v = max(0.0, min(100.0, v))
     return v / 100.0
 
 def _signal_global_from_score(score):
-    try:
-        s = float(score)
-    except Exception:
-        return "Neutre ⚪"
+    try: s = float(score)
+    except: return "Neutre ⚪"
     if s > 8:  return f"Achat {dot_green()}"
     if s > 6:  return f"Achat {dot_yellow()}"
     if s > 5:  return f"Neutre {dot_white()}"
     if s > 3:  return f"Vente {dot_orange()}"
     return f"Vente {dot_red()}"
 
-def compute_global_score(tfs: dict, senti: dict):
+def compute_global_score(tfs: dict, senti: dict, actuality_score: float = None):
     score_components = []
     for tf, wtf in _W_TF.items():
         vals = tfs.get(tf, {}) if isinstance(tfs, dict) else {}
@@ -348,14 +357,25 @@ def compute_global_score(tfs: dict, senti: dict):
         s_vol   = _score_from_vol(vals.get("Volume"), vals.get("Volume_Mean"))
         s_tf = (s_rsi * _W_RSI + s_trend * _W_TREND + s_macd * _W_MACD + s_bb * _W_BB + s_vol * _W_VOL)
         score_components.append(s_tf * wtf)
+
     s_senti = _score_from_sentiment(senti) * _W_SENTI
-    total_0_1 = max(0.0, min(1.0, sum(score_components) + s_senti))
+    score_sum = sum(score_components) + s_senti
+
+    # 🆕 Actuality factor (0..1) depuis score 0..100
+    if actuality_score is not None and not pd.isna(actuality_score):
+        try:
+            a0_1 = max(0.0, min(1.0, float(actuality_score) / 100.0))
+        except Exception:
+            a0_1 = 0.5
+        score_sum += a0_1 * _W_ACTUALITY
+
+    total_0_1 = max(0.0, min(1.0, score_sum))
     score_0_10 = round(total_0_1 * 10.0, 1)
     signal = _signal_global_from_score(score_0_10)
     return score_0_10, signal
 
 # ======================================================
-# 🌍 Sentiments par crypto (inchangé, labels clean)
+# 🌍 Sentiments par crypto (déjà en V5.1)
 # ======================================================
 def get_sentiment_for_symbol(symbol: str) -> dict:
     try:
@@ -423,6 +443,120 @@ def _sentiment_global_label(senti: dict) -> str:
         return f"Neutre {dot_white()}"
 
 # ======================================================
+# 🗞️ ACTUALITY – CryptoPanic & Google Trends (V5.2)
+# ======================================================
+def get_news_score(symbol: str) -> dict:
+    """
+    Récupère les posts CryptoPanic (plan Developer = 24h de délai, suffisant pour un signal de fond).
+    Calcule:
+      - News_Count (posts retournés)
+      - Positive_% / Negative_% via votes (fallback neutre si indispo)
+      - News_Score = Positive_% (0..100)
+    """
+    if not CRYPTOPANIC_KEY:
+        return {"News_Count": np.nan, "Positive_%": np.nan, "Negative_%": np.nan, "News_Score": np.nan}
+
+    try:
+        base = "https://cryptopanic.com/api/developer/v2/posts/"
+        params = {
+            "auth_token": CRYPTOPANIC_KEY,
+            "currencies": symbol.upper(),
+            "filter": "hot",     # hot / rising / important
+            "kind": "news",      # seulement news (pas opinions)
+            "public": "true",
+            "regions": "en"      # réduire bruit
+        }
+        r = requests.get(base, params=params, timeout=12)
+        if r.status_code != 200:
+            return {"News_Count": np.nan, "Positive_%": np.nan, "Negative_%": np.nan, "News_Score": np.nan}
+
+        data = r.json()
+        items = data.get("results", []) or data.get("posts", []) or []
+        n = len(items)
+        if n == 0:
+            return {"News_Count": 0, "Positive_%": np.nan, "Negative_%": np.nan, "News_Score": np.nan}
+
+        pos_votes = 0
+        neg_votes = 0
+        for it in items:
+            votes = it.get("votes") or {}
+            pos_votes += int(votes.get("positive", 0))
+            neg_votes += int(votes.get("negative", 0))
+
+        total_votes = pos_votes + neg_votes
+        if total_votes == 0:
+            # fallback : si pas de votes, score neutre mais pénalisé
+            return {"News_Count": n, "Positive_%": 50.0, "Negative_%": 50.0, "News_Score": 45.0}
+
+        pos_pct = 100.0 * pos_votes / total_votes
+        neg_pct = 100.0 * neg_votes / total_votes
+        return {"News_Count": n, "Positive_%": round(pos_pct, 1), "Negative_%": round(neg_pct, 1), "News_Score": round(pos_pct, 1)}
+    except Exception as e:
+        print(f"⚠️ Erreur get_news_score({symbol}) : {e}", flush=True)
+        return {"News_Count": np.nan, "Positive_%": np.nan, "Negative_%": np.nan, "News_Score": np.nan}
+
+def get_trend_score(symbol: str) -> float:
+    """
+    Google Trends 7 derniers jours — normalisé 0..100.
+    Mot-clé: nom usuel (bitcoin/ethereum/solana...)
+    """
+    sym2kw = {
+        "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "bnb",
+        "ADA": "cardano", "DOGE": "dogecoin", "AVAX": "avalanche",
+        "XRP": "xrp", "LINK": "chainlink", "MATIC": "polygon"
+    }
+    kw = sym2kw.get(symbol.upper(), symbol.upper())
+    try:
+        pt = TrendReq(hl="en-US", tz=0)
+        pt.build_payload([kw], timeframe="now 7-d", geo="")
+        df = pt.interest_over_time()
+        if df is None or df.empty or kw not in df.columns:
+            return np.nan
+        # dernière valeur (0..100 déjà normalisée)
+        return float(df[kw].iloc[-1])
+    except Exception as e:
+        print(f"⚠️ Erreur get_trend_score({symbol}) : {e}", flush=True)
+        return np.nan
+
+def compute_actuality(symbol: str) -> dict:
+    """
+    Fusionne News_Score (60%) et Trend_Score (40%) => Actuality_Score (0..100)
+    et renvoie aussi un libellé coloré.
+    """
+    news = get_news_score(symbol)
+    trend = get_trend_score(symbol)
+
+    ns = news.get("News_Score", np.nan)
+    ts = trend if trend is not None else np.nan
+
+    parts = []
+    if not pd.isna(ns): parts.append(("news", float(ns)))
+    if not pd.isna(ts): parts.append(("trend", float(ts)))
+
+    if not parts:
+        act_score = np.nan
+    else:
+        # 60% news, 40% trends
+        w_news, w_trend = 0.6, 0.4
+        v_news = next((v for k, v in parts if k == "news"), np.nan)
+        v_trend = next((v for k, v in parts if k == "trend"), np.nan)
+        if pd.isna(v_news) and pd.isna(v_trend):
+            act_score = np.nan
+        else:
+            if pd.isna(v_news):  v_news = 50.0
+            if pd.isna(v_trend): v_trend = 50.0
+            act_score = w_news * v_news + w_trend * v_trend
+
+    return {
+        "News_Count": news.get("News_Count"),
+        "Positive_%": news.get("Positive_%"),
+        "Negative_%": news.get("Negative_%"),
+        "Trend_Score": round(ts, 1) if not pd.isna(ts) else np.nan,
+        "Actuality_Score": round(act_score, 1) if not pd.isna(act_score) else np.nan,
+        "Actuality_Sentiment": label_actuality(act_score) if not pd.isna(act_score) else f"Insuffisant {dot_white()}",
+    }
+
+# ======================================================
 # 💵 Prix actuel (USD) — cache 5 minutes + fallback
 # ======================================================
 _COINGECKO_IDS = {
@@ -483,15 +617,12 @@ def get_candles(symbol_pair, granularity):
         return None
 
 # ======================================================
-# 📈 Calculs d’indicateurs (avec RSI fallback)
+# 📈 Calculs d’indicateurs (avec RSI fallback V5.1)
 # ======================================================
 def compute_indicators(df):
     if df is None or df.empty: return df
     df = df.copy()
-    close = df["close"]
-    high  = df["high"]
-    low   = df["low"]
-    vol   = df["volume"]
+    close = df["close"]; high = df["high"]; low = df["low"]; vol = df["volume"]
 
     # --------- RSI (Wilder) avec fallback ---------
     def _rsi_series(series, period):
@@ -505,7 +636,6 @@ def compute_indicators(df):
 
     rsi_period = 14
     if len(close) < rsi_period + 1:
-        # fallback dynamique
         alt = max(3, len(close)//2)
         df["RSI14"] = _rsi_series(close, alt)
     else:
@@ -521,7 +651,7 @@ def compute_indicators(df):
     df["EMA20"] = close.ewm(span=20, adjust=False).mean()
     df["EMA50"] = close.ewm(span=50, adjust=False).mean()
 
-    # --------- Bollinger (fallback min_periods) ---------
+    # --------- Bollinger ---------
     win = 20 if len(close) >= 20 else max(3, len(close)//2)
     bb_mid = close.rolling(win, min_periods=3).mean()
     bb_std = close.rolling(win, min_periods=3).std()
@@ -708,7 +838,7 @@ def analyze_symbol(symbol_pair):
     return flat
 
 # ======================================================
-# 📊 Mise à jour Google Sheets
+# 📊 Mise à jour Google Sheets (intègre V5.2)
 # ======================================================
 def update_sheet():
     try:
@@ -716,7 +846,7 @@ def update_sheet():
         try:
             ws = sh.worksheet("MultiTF")
         except gspread.exceptions.WorksheetNotFound:
-            ws = sh.add_worksheet(title="MultiTF", rows="600", cols="260")
+            ws = sh.add_worksheet(title="MultiTF", rows="800", cols="280")
 
         cryptos_pairs = ["BTC-USD","ETH-USD","SOL-USD","BNB-USD","ADA-USD","DOGE-USD","AVAX-USD","XRP-USD","LINK-USD","MATIC-USD"]
         symbols = [c.split("-")[0] for c in cryptos_pairs]
@@ -733,7 +863,12 @@ def update_sheet():
                 continue
 
             symbol = pair.split("-")[0]
+
+            # Sentiment (déjà V5.1)
             senti = get_sentiment_for_symbol(symbol)
+            # 🗞️ Actuality (V5.2) — rafraîchie à chaque update horaire
+            actuality = compute_actuality(symbol)
+
             # Scoring global basé sur _RAW_*
             tfs = {}
             for tf in ["1h","6h","1d"]:
@@ -751,14 +886,11 @@ def update_sheet():
                         "Volume_Mean": res.get(f"_RAW_VOLMEAN_{tf}"),
                     }
 
-            score_10, signal_global = compute_global_score(tfs, senti)
+            score_10, signal_global = compute_global_score(tfs, senti, actuality_score=actuality.get("Actuality_Score"))
 
             # Prix actuel (USD) depuis cache (formaté avec $)
             px = get_price_usd(symbol)
-            if px is None:
-                price_str = "N/A"
-            else:
-                price_str = f"{safe_round(px, 2):.2f} $"
+            price_str = f"{safe_round(px, 2):.2f} $" if px is not None else "N/A"
 
             # Ligne exportée (sans _RAW_*)
             flat = {
@@ -782,6 +914,15 @@ def update_sheet():
             flat["News Intensity"]     = senti.get("News_Intensity")
             flat["Sentiment Score"]    = senti.get("Sentiment_Score")
             flat["Sentiment Global"]   = _sentiment_global_label(senti)
+
+            # 🗞️ Actuality (V5.2)
+            flat["News Count"]         = actuality.get("News_Count")
+            flat["Positive %"]         = actuality.get("Positive_%")
+            flat["Negative %"]         = actuality.get("Negative_%")
+            flat["Trend Score"]        = actuality.get("Trend_Score")
+            flat["Actuality Score"]    = actuality.get("Actuality_Score")
+            flat["Actuality Sentiment"]= actuality.get("Actuality_Sentiment")
+
             flat["Last Update"]        = now_paris_str()  # 🇫🇷
 
             rows.append(flat)
@@ -808,14 +949,17 @@ def update_sheet():
                        "ADX","ATR","MFI","CCI","OBV","SuperTrend","Ichimoku","Donchian","Pivot","MA200"]:
             ordered += _order_by_family(family)
 
-        emotion_cols = ["Fear & Greed Index","Social Sentiment","News Intensity","Sentiment Score","Sentiment Global","Last Update"]
-        remaining = [c for c in df_out.columns if c not in ordered and c not in emotion_cols]
-        ordered += remaining + [c for c in emotion_cols if c in df_out.columns]
+        # Blocs sentiments + actuality
+        emotion_cols = ["Fear & Greed Index","Social Sentiment","News Intensity","Sentiment Score","Sentiment Global"]
+        actuality_cols = ["News Count","Positive %","Negative %","Trend Score","Actuality Score","Actuality Sentiment","Last Update"]
+
+        remaining = [c for c in df_out.columns if c not in ordered and c not in emotion_cols and c not in actuality_cols]
+        ordered += remaining + [c for c in emotion_cols if c in df_out.columns] + [c for c in actuality_cols if c in df_out.columns]
         df_out = df_out.reindex(columns=[c for c in ordered if c in df_out.columns])
 
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour : UI clean + RSI fallback + prix USD + heure FR.", flush=True)
+        print("✅ Feuille 'MultiTF' mise à jour : V5.2 (Actuality + Trends) + score global pondéré.", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
@@ -846,7 +990,7 @@ def keep_alive():
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe — V5.1 UI clean + RSI fallback + Prix USD + Heure FR"
+    return "✅ Crypto Bot Multi-Timeframe — V5.2 Actuality (CryptoPanic + Google Trends) + Score pondéré"
 
 @app.route("/run")
 def manual_run():

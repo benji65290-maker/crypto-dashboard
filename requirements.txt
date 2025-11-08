@@ -6,3 +6,4 @@ gspread-dataframe
 google-auth
 flask
 pytz
+pytrends
