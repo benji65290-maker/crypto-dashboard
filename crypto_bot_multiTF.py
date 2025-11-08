@@ -1,4 +1,4 @@
-
+# crypto_bot_multiTF_V4_final.py
 import threading
 import time
 import requests
@@ -7,10 +7,11 @@ import numpy as np
 import os
 import json
 import gspread
-import re
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
 from flask import Flask
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 
@@ -55,20 +56,24 @@ def pct(a, b):
     except Exception:
         return np.nan
 
+def now_paris_str():
+    tz = pytz.timezone("Europe/Paris")
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
 # ======================================================
-# 🎨 Pastilles & Labels (palette unifiée 🟢🔵⚪🟠🔴)
+# 🎨 Pastilles & Labels (palette unifiée 🟢🟡⚪🟠🔴)
 # ======================================================
-def dot_green(): return "🟢"
-def dot_blue():  return "🔵"
-def dot_white(): return "⚪"
-def dot_orange():return "🟠"
-def dot_red():   return "🔴"
+def dot_green():  return "🟢"
+def dot_yellow(): return "🟡"
+def dot_white():  return "⚪"
+def dot_orange(): return "🟠"
+def dot_red():    return "🔴"
 
 def label_rsi(v):
     if v is None or (isinstance(v, float) and np.isnan(v)): return "N/A " + dot_white()
     v = float(v)
     if v < 30:       return f"{v:.1f} {dot_green()} Achat"
-    elif v < 45:     return f"{v:.1f} {dot_blue()} Léger rebond"
+    elif v < 45:     return f"{v:.1f} {dot_yellow()} Léger rebond"
     elif v <= 55:    return f"{v:.1f} {dot_white()} Neutre"
     elif v <= 70:    return f"{v:.1f} {dot_orange()} Surachat modéré"
     else:            return f"{v:.1f} {dot_red()} Vente"
@@ -82,7 +87,7 @@ def label_macd_cross(macd, signal, prev_macd=None, prev_signal=None):
         if macd > signal and (trend_up is True):
             return f"📈 Bullish {dot_green()}"
         if macd > signal:
-            return f"📈 Bullish {dot_blue()}"
+            return f"📈 Bullish {dot_yellow()}"
         if abs(macd - signal) <= 1e-6:
             return f"❌ Aucun {dot_white()}"
         if macd < signal and (trend_up is False):
@@ -96,7 +101,7 @@ def label_trend(ema20, ema50):
         ema20 = float(ema20); ema50 = float(ema50)
         spread = pct(ema20, ema50)
         if spread > 0.02:  return f"Bull {dot_green()}"
-        if spread > 0.0:   return f"Bull {dot_blue()}"
+        if spread > 0.0:   return f"Bull {dot_yellow()}"
         if abs(spread) <= 0.005: return f"Neutre {dot_white()}"
         if spread > -0.02: return f"Bear {dot_orange()}"
         return f"Bear {dot_red()}"
@@ -107,7 +112,7 @@ def label_bollinger(close, lower, upper):
     try:
         close = float(close); lower=float(lower); upper=float(upper)
         if close < lower: return f"⬇️ Survente {dot_green()}"
-        if close <= lower * 1.02: return f"⬇️ Proche bas {dot_blue()}"
+        if close <= lower * 1.02: return f"⬇️ Proche bas {dot_yellow()}"
         if lower < close < upper: return f"〰️ Neutre {dot_white()}"
         if close >= upper * 0.98 and close <= upper: return f"⬆️ Proche haut {dot_orange()}"
         if close > upper: return f"⬆️ Surachat {dot_red()}"
@@ -119,7 +124,7 @@ def label_volume(vol, vol_mean):
     try:
         vol=float(vol); vm=float(vol_mean)
         if vol >= vm*1.30: return f"⬆️ Haussier {dot_green()}"
-        if vol >= vm*1.10: return f"⬆️ Léger {dot_blue()}"
+        if vol >= vm*1.10: return f"⬆️ Léger {dot_yellow()}"
         if abs(vol-vm)/max(vm,1e-9) <= 0.1: return f"〰️ Normal {dot_white()}"
         if vol > vm*0.70: return f"⬇️ Léger {dot_orange()}"
         return f"⬇️ Faible {dot_red()}"
@@ -131,7 +136,7 @@ def label_close_vs_ema50(close, ema50):
         c=float(close); e=float(ema50)
         spread = pct(c,e)
         if spread > 0.02:  return f"{c:.1f} {dot_green()}"
-        if spread > 0.0:   return f"{c:.1f} {dot_blue()}"
+        if spread > 0.0:   return f"{c:.1f} {dot_yellow()}"
         if abs(spread) <= 0.005: return f"{c:.1f} {dot_white()}"
         if spread > -0.02: return f"{c:.1f} {dot_orange()}"
         return f"{c:.1f} {dot_red()}"
@@ -143,7 +148,7 @@ def label_adx(adx):
         a=float(adx)
         if a > 40:   return f"{a:.1f} {dot_red()} Fort (fin de cycle?)"
         if a >= 25:  return f"{a:.1f} {dot_green()} Solide"
-        if a >= 20:  return f"{a:.1f} {dot_blue()} Début tendance"
+        if a >= 20:  return f"{a:.1f} {dot_yellow()} Début tendance"
         if a >= 15:  return f"{a:.1f} {dot_white()} Faible"
         return f"{a:.1f} {dot_orange()} Sans direction"
     except Exception:
@@ -153,7 +158,7 @@ def label_mfi(mfi):
     try:
         m=float(mfi)
         if m < 20:   return f"{m:.1f} {dot_green()} Survente"
-        if m < 40:   return f"{m:.1f} {dot_blue()} Rebond"
+        if m < 40:   return f"{m:.1f} {dot_yellow()} Rebond"
         if m <= 60:  return f"{m:.1f} {dot_white()} Neutre"
         if m <= 80:  return f"{m:.1f} {dot_orange()} Surachat mod."
         return f"{m:.1f} {dot_red()} Surachat"
@@ -164,7 +169,7 @@ def label_cci(cci):
     try:
         c=float(cci)
         if c < -100:  return f"{c:.0f} {dot_green()} Survente"
-        if c < 0:     return f"{c:.0f} {dot_blue()} Rebond"
+        if c < 0:     return f"{c:.0f} {dot_yellow()} Rebond"
         if c <= 100:  return f"{c:.0f} {dot_white()} Neutre"
         if c <= 200:  return f"{c:.0f} {dot_orange()} Surachat mod."
         return f"{c:.0f} {dot_red()} Surachat"
@@ -318,7 +323,7 @@ def _signal_global_from_score(score):
     except Exception:
         return "⚪ Neutre"
     if s > 8:  return "🟢 Achat fort"
-    if s > 6:  return "🔵 Achat modéré"
+    if s > 6:  return "🟡 Achat modéré"
     if s > 5:  return "⚪ Neutre"
     if s > 3:  return "🟠 Vente modérée"
     return "🔴 Vente forte"
@@ -345,7 +350,6 @@ def compute_global_score(tfs: dict, senti: dict):
 # ======================================================
 def get_sentiment_for_symbol(symbol: str) -> dict:
     try:
-        # Fear & Greed global
         fg_value = np.nan
         fg_label = "❌"
         try:
@@ -358,7 +362,6 @@ def get_sentiment_for_symbol(symbol: str) -> dict:
         except Exception:
             pass
 
-        # Trending Coingecko
         social_sent = 0.0
         try:
             trending = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10).json()
@@ -368,7 +371,6 @@ def get_sentiment_for_symbol(symbol: str) -> dict:
         except Exception:
             pass
 
-        # Intensité "news" via volatilité globale (fallback): mcap change 24h
         news_intensity = 0.5
         try:
             news_req = requests.get("https://api.coingecko.com/api/v3/global", timeout=10).json()
@@ -377,7 +379,6 @@ def get_sentiment_for_symbol(symbol: str) -> dict:
         except Exception:
             pass
 
-        # Score synthétique (0-100)
         base = []
         if not np.isnan(fg_value): base.append(fg_value)
         base.append(social_sent)
@@ -409,7 +410,7 @@ def _sentiment_global_label(senti: dict) -> str:
         vals = []
         if not np.isnan(fg): vals.append(fg / 100.0)
         if not np.isnan(ss): vals.append(ss / 100.0)
-        if not np.isnan(ni): vals.append(1.0 - abs(ni - 0.5) * 2.0)  # max quand ni ≈ 0.5
+        if not np.isnan(ni): vals.append(1.0 - abs(ni - 0.5) * 2.0)
         if not vals:
             return "⚪ Neutre"
         m = sum(vals) / len(vals)
@@ -420,10 +421,47 @@ def _sentiment_global_label(senti: dict) -> str:
         return "⚪ Neutre"
 
 # ======================================================
+# 💵 Prix actuel (USD) avec cache 5 minutes + fallback
+# ======================================================
+_COINGECKO_IDS = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin",
+    "ADA": "cardano", "DOGE": "dogecoin", "AVAX": "avalanche-2", "XRP": "ripple",
+    "LINK": "chainlink", "MATIC": "polygon-pos"
+}
+_price_cache = {"ts": 0.0, "data": {}}  # {"SYMBOL": float_price}
+
+def _refresh_price_cache_usd(symbols):
+    ids = [ _COINGECKO_IDS.get(sym, "") for sym in symbols ]
+    ids = [i for i in ids if i]
+    if not ids:
+        return
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {"ids": ",".join(ids), "vs_currencies": "usd"}
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return
+        data = r.json()
+        for sym in symbols:
+            cid = _COINGECKO_IDS.get(sym)
+            if cid and cid in data and "usd" in data[cid]:
+                _price_cache["data"][sym] = float(data[cid]["usd"])
+        _price_cache["ts"] = time.time()
+    except Exception as e:
+        print(f"⚠️ Erreur refresh price cache: {e}", flush=True)
+
+def get_price_usd(symbol):
+    # symbol like 'BTC','ETH'...
+    now = time.time()
+    # si cache trop vieux → None (on déclenche un refresh amont dans update_sheet)
+    if now - _price_cache["ts"] > 300:
+        return _price_cache["data"].get(symbol)  # fallback: dernier prix connu si présent
+    return _price_cache["data"].get(symbol)
+
+# ======================================================
 # ⚙️ API Coinbase – Données OHLC
 # ======================================================
 def get_candles(symbol_pair, granularity):
-    """Renvoie un DataFrame trié (time asc) avec colonnes: time, low, high, open, close, volume."""
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles"
     params = {"granularity": granularity}
     headers = {"User-Agent": "CryptoBot/1.0"}
@@ -564,7 +602,6 @@ def compute_indicators(df):
 def summarize_last_row(df):
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
-
     out = {
         "Close": safe_round(last["close"]),
         "Volume": safe_round(last["volume"]),
@@ -617,45 +654,41 @@ def analyze_symbol(symbol_pair):
         return None
 
     flat = {"Crypto": symbol_pair.split("-")[0]}
-
-    # Consensus simple EMA20/EMA50
     tf_trends = []
-    for tf, vals in data.items():
+    for _, vals in data.items():
         tf_trends.append(1 if (vals.get("EMA20", np.nan) > vals.get("EMA50", np.nan)) else -1)
-    score_trend = sum([1 for v in tf_trends if v == 1]) - sum([1 for v in tf_trends if v == -1])
+    score_trend = tf_trends.count(1) - tf_trends.count(-1)
     consensus = "🟢 Achat fort" if score_trend >= 2 else "🔴 Vente forte" if score_trend <= -2 else "⚪ Neutre"
     flat["Consensus"] = consensus
 
-    # FUSION
     def add_tf_cols(tf, v):
-        flat[f"RSI {tf.upper()}"] = label_rsi(v.get("RSI"))
-        flat[f"Trend {tf.upper()}"] = label_trend(v.get("EMA20"), v.get("EMA50"))
-        flat[f"MACD Cross {tf.upper()}"] = label_macd_cross(v.get("MACD"), v.get("MACD_Signal"), v.get("_prev_MACD"), v.get("_prev_Signal"))
+        flat[f"RSI {tf.upper()}"]           = label_rsi(v.get("RSI"))
+        flat[f"Trend {tf.upper()}"]         = label_trend(v.get("EMA20"), v.get("EMA50"))
+        flat[f"MACD Cross {tf.upper()}"]    = label_macd_cross(v.get("MACD"), v.get("MACD_Signal"), v.get("_prev_MACD"), v.get("_prev_Signal"))
         flat[f"Bollinger Pos {tf.upper()}"] = label_bollinger(v.get("Close"), v.get("BB_Lower"), v.get("BB_Upper"))
         flat[f"Volume Sentiment {tf.upper()}"] = label_volume(v.get("Volume"), v.get("Volume_Mean"))
-        flat[f"Close Price {tf.upper()}"] = label_close_vs_ema50(v.get("Close"), v.get("EMA50"))
-
-        flat[f"ADX {tf.upper()}"] = label_adx(v.get("ADX"))
-        flat[f"ATR {tf.upper()}"] = label_atr(v.get("ATR14"), v.get("ATR14_MA20"))
-        flat[f"MFI {tf.upper()}"] = label_mfi(v.get("MFI"))
-        flat[f"CCI {tf.upper()}"] = label_cci(v.get("CCI"))
-        flat[f"OBV Δ {tf.upper()}"] = label_obv(v.get("OBV_Delta"))
-        flat[f"SuperTrend {tf.upper()}"] = label_supertrend(v.get("SuperTrend"))
-        flat[f"Ichimoku {tf.upper()}"] = label_ichimoku(v.get("ICH_Tenkan"), v.get("ICH_Kijun"))
-        flat[f"Donchian {tf.upper()}"] = label_donchian(v.get("Close"), v.get("Donchian_High"), v.get("Donchian_Low"))
-        flat[f"Pivot Zone {tf.upper()}"] = label_pivot(v.get("Close"), v.get("R1"), v.get("S1"))
-        flat[f"MA200 {tf.upper()}"] = label_ma200(v.get("Close"), v.get("MA200"))
+        flat[f"Close Price {tf.upper()}"]   = label_close_vs_ema50(v.get("Close"), v.get("EMA50"))
+        flat[f"ADX {tf.upper()}"]           = label_adx(v.get("ADX"))
+        flat[f"ATR {tf.upper()}"]           = label_atr(v.get("ATR14"), v.get("ATR14_MA20"))
+        flat[f"MFI {tf.upper()}"]           = label_mfi(v.get("MFI"))
+        flat[f"CCI {tf.upper()}"]           = label_cci(v.get("CCI"))
+        flat[f"OBV Δ {tf.upper()}"]         = label_obv(v.get("OBV_Delta"))
+        flat[f"SuperTrend {tf.upper()}"]    = label_supertrend(v.get("SuperTrend"))
+        flat[f"Ichimoku {tf.upper()}"]      = label_ichimoku(v.get("ICH_Tenkan"), v.get("ICH_Kijun"))
+        flat[f"Donchian {tf.upper()}"]      = label_donchian(v.get("Close"), v.get("Donchian_High"), v.get("Donchian_Low"))
+        flat[f"Pivot Zone {tf.upper()}"]    = label_pivot(v.get("Close"), v.get("R1"), v.get("S1"))
+        flat[f"MA200 {tf.upper()}"]         = label_ma200(v.get("Close"), v.get("MA200"))
 
         # RAW pour scoring
-        flat[f"_RAW_RSI_{tf}"] = v.get("RSI")
-        flat[f"_RAW_EMA20_{tf}"] = v.get("EMA20")
-        flat[f"_RAW_EMA50_{tf}"] = v.get("EMA50")
-        flat[f"_RAW_MACD_{tf}"] = v.get("MACD")
-        flat[f"_RAW_SIG_{tf}"] = v.get("MACD_Signal")
-        flat[f"_RAW_BBLOW_{tf}"] = v.get("BB_Lower")
-        flat[f"_RAW_BBUP_{tf}"] = v.get("BB_Upper")
-        flat[f"_RAW_CLOSE_{tf}"] = v.get("Close")
-        flat[f"_RAW_VOL_{tf}"] = v.get("Volume")
+        flat[f"_RAW_RSI_{tf}"]     = v.get("RSI")
+        flat[f"_RAW_EMA20_{tf}"]   = v.get("EMA20")
+        flat[f"_RAW_EMA50_{tf}"]   = v.get("EMA50")
+        flat[f"_RAW_MACD_{tf}"]    = v.get("MACD")
+        flat[f"_RAW_SIG_{tf}"]     = v.get("MACD_Signal")
+        flat[f"_RAW_BBLOW_{tf}"]   = v.get("BB_Lower")
+        flat[f"_RAW_BBUP_{tf}"]    = v.get("BB_Upper")
+        flat[f"_RAW_CLOSE_{tf}"]   = v.get("Close")
+        flat[f"_RAW_VOL_{tf}"]     = v.get("Volume")
         flat[f"_RAW_VOLMEAN_{tf}"] = v.get("Volume_Mean")
 
     for tf in ["1h","6h","1d"]:
@@ -675,10 +708,15 @@ def update_sheet():
         except gspread.exceptions.WorksheetNotFound:
             ws = sh.add_worksheet(title="MultiTF", rows="600", cols="260")
 
-        cryptos = ["BTC-USD","ETH-USD","SOL-USD","BNB-USD","ADA-USD","DOGE-USD","AVAX-USD","XRP-USD","LINK-USD","MATIC-USD"]
+        cryptos_pairs = ["BTC-USD","ETH-USD","SOL-USD","BNB-USD","ADA-USD","DOGE-USD","AVAX-USD","XRP-USD","LINK-USD","MATIC-USD"]
+        symbols = [c.split("-")[0] for c in cryptos_pairs]
+
+        # 🔄 refresh cache prix (5 min)
+        if time.time() - _price_cache["ts"] > 300:
+            _refresh_price_cache_usd(symbols)
 
         rows = []
-        for pair in cryptos:
+        for pair in cryptos_pairs:
             res = analyze_symbol(pair)
             if not res:
                 print(f"⚠️ Données manquantes pour {pair} — ignoré.", flush=True)
@@ -706,11 +744,21 @@ def update_sheet():
 
             score_10, signal_global = compute_global_score(tfs, senti)
 
+            # Prix actuel (USD) depuis cache (formaté avec $)
+            px = get_price_usd(symbol)
+            if px is None:
+                price_str = "N/A"
+            else:
+                price_str = f"{safe_round(px, 2):.2f} $"
+
             # Ligne exportée (sans _RAW_*)
-            flat = {"Crypto": res["Crypto"],
-                    "Global Score (0-10)": score_10,
-                    "Signal Global": signal_global,
-                    "Consensus": res.get("Consensus")}
+            flat = {
+                "Crypto": res["Crypto"],
+                "Prix Actuel (USD)": price_str,             # 2e colonne (string avec $)
+                "Global Score (0-10)": score_10,
+                "Signal Global": signal_global,
+                "Consensus": res.get("Consensus")
+            }
 
             for k, v in res.items():
                 if k.startswith("_RAW_"): 
@@ -722,11 +770,11 @@ def update_sheet():
             # Sentiments
             flat["Fear & Greed Index"] = senti.get("FearGreed_Index")
             flat["Fear & Greed Label"] = senti.get("FearGreed_Label")
-            flat["Social Sentiment"] = senti.get("Social_Sentiment")
-            flat["News Intensity"] = senti.get("News_Intensity")
-            flat["Sentiment Score"] = senti.get("Sentiment_Score")
-            flat["Sentiment Global"] = _sentiment_global_label(senti)
-            flat["Last Update"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            flat["Social Sentiment"]   = senti.get("Social_Sentiment")
+            flat["News Intensity"]     = senti.get("News_Intensity")
+            flat["Sentiment Score"]    = senti.get("Sentiment_Score")
+            flat["Sentiment Global"]   = _sentiment_global_label(senti)
+            flat["Last Update"]        = now_paris_str()                 # Heure FR 🇫🇷
 
             rows.append(flat)
             time.sleep(1.0)
@@ -738,7 +786,7 @@ def update_sheet():
         df_out = pd.DataFrame(rows)
 
         # Ordre de colonnes lisible
-        cols_front = ["Crypto","Global Score (0-10)","Signal Global","Consensus"]
+        cols_front = ["Crypto","Prix Actuel (USD)","Global Score (0-10)","Signal Global","Consensus"]
 
         def _order_by_family(prefix):
             out = []
@@ -759,7 +807,7 @@ def update_sheet():
 
         ws.clear()
         set_with_dataframe(ws, df_out)
-        print("✅ Feuille 'MultiTF' mise à jour : colonnes fusionnées + pastilles.", flush=True)
+        print("✅ Feuille 'MultiTF' mise à jour : palette 🟡, prix USD ($), heure FR.", flush=True)
 
     except Exception as e:
         print(f"❌ Erreur update_sheet() : {e}", flush=True)
@@ -790,7 +838,7 @@ def keep_alive():
 # ======================================================
 @app.route("/")
 def home():
-    return "✅ Crypto Bot Multi-Timeframe actif — FULL FUSION + pastilles 🟢🔵⚪🟠🔴"
+    return "✅ Crypto Bot Multi-Timeframe — FUSION + pastilles 🟢🟡⚪🟠🔴 + Prix USD ($) + Heure FR"
 
 @app.route("/run")
 def manual_run():
