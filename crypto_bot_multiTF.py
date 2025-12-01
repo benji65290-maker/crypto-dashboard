@@ -18,7 +18,7 @@ app = Flask(__name__)
 # ⚙️ CONFIGURATION & CONSTANTES
 # ======================================================
 # Capital total fictif pour le calcul de position (à ajuster)
-TOTAL_CAPITAL = 500
+TOTAL_CAPITAL = 10000 
 # Risque max par trade (1% du capital)
 RISK_PER_TRADE_PCT = 0.01 
 
@@ -44,7 +44,8 @@ try:
     print("✅ Credentials Google OK", flush=True)
 except Exception as e:
     print(f"❌ Erreur credentials Google : {e}", flush=True)
-    raise SystemExit()
+    # On ne quitte pas brutalement pour laisser le serveur web tourner
+    pass
 
 # ======================================================
 # 🧠 MOTEUR D'ANALYSE TECHNIQUE
@@ -56,20 +57,34 @@ def get_candles(product_id: str, granularity=3600, limit=300):
         url = f"{CB_BASE}/products/{product_id}/candles"
         # Granularité: 3600=1h, 21600=6h, 86400=1d
         r = requests.get(url, params={"granularity": granularity}, timeout=10)
+        
         if r.status_code == 429:
             print(f"⚠️ Rate Limit Coinbase sur {product_id}, pause 2s...", flush=True)
             time.sleep(2)
             return None
         if r.status_code != 200:
+            # print(f"⚠️ Erreur API {product_id}: {r.status_code}", flush=True)
             return None
+            
         data = r.json()
         if not data:
             return None
         
         df = pd.DataFrame(data, columns=["ts", "low", "high", "open", "close", "volume"])
+        
+        # --- CORRECTION DU BUG ICI ---
+        # 1. On convertit d'abord les colonnes numériques
+        numeric_cols = ["low", "high", "open", "close", "volume"]
+        df[numeric_cols] = df[numeric_cols].astype(float)
+        
+        # 2. Ensuite on gère la date
         df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(None)
+        
+        # 3. On trie
         df = df.sort_values("ts").reset_index(drop=True)
-        return df.astype(float)
+        
+        return df
+        
     except Exception as e:
         print(f"⚠️ Erreur get_candles({product_id}): {e}", flush=True)
         return None
@@ -101,8 +116,12 @@ def bollinger_squeeze(df, period=20):
     std = df["close"].rolling(period).std()
     upper = sma + (2 * std)
     lower = sma - (2 * std)
+    
+    # Évite la division par zéro
+    if sma.iloc[-1] == 0: return 0, False
+    
     bandwidth = (upper - lower) / sma
-    # Si la largeur de bande est historiquement basse (< 5% environ pour crypto)
+    # Si la largeur de bande est historiquement basse (< 10% environ pour crypto)
     is_squeeze = bandwidth < 0.10 
     return bandwidth, is_squeeze
 
@@ -144,8 +163,9 @@ def analyze_crypto(symbol, pid):
         df["BB_Width"], df["Squeeze"] = bollinger_squeeze(df)
         
         data_store[tf_name] = df
-        time.sleep(0.3) # Petit délai API
+        time.sleep(0.4) # Petit délai API pour éviter le Rate Limit
 
+    # On a besoin au minimum du 1H et du 1D pour décider
     if "1h" not in data_store or "1d" not in data_store:
         return None
 
@@ -244,12 +264,18 @@ def update_sheet():
                 results.append(data)
                 print(f"   ✅ {sym} Score: {data['Score']}/100 - Signal: {data['Signal']}")
             
-        if not results: return
+        if not results: 
+            print("⚠️ Aucun résultat à écrire.", flush=True)
+            return
 
         df_out = pd.DataFrame(results)
         # Réorganiser les colonnes pour la lisibilité
         cols = ["Crypto", "Prix", "Signal", "Score", "Trend_D1", "Position_USD", 
                 "Stop_Loss", "Take_Profit", "RSI_1H", "Divergence", "Squeeze"]
+        # On s'assure que toutes les colonnes existent
+        for c in cols:
+            if c not in df_out.columns: df_out[c] = ""
+            
         df_out = df_out[cols]
         
         # Ajout timestamp
