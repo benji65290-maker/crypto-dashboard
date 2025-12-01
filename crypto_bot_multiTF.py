@@ -1,11 +1,11 @@
 import threading
 import time
-import requests
 import pandas as pd
 import numpy as np
 import os
 import json
 import gspread
+import ccxt  # Nouvelle librairie Pro
 from datetime import datetime, timezone
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
@@ -14,201 +14,205 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION BINANCE & RISQUE
 # ======================================================
+# Récupération des clés depuis les variables d'environnement Render
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
+
 TOTAL_CAPITAL = 10000 
 RISK_PER_TRADE_PCT = 0.01 
 
-CB_BASE = "https://api.exchange.coinbase.com"
-PRODUCTS = {
-    "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
-    "BNB": "BNB-USD", "ADA": "ADA-USD", "DOGE": "DOGE-USD",
-    "AVAX": "AVAX-USD", "XRP": "XRP-USD", "LINK": "LINK-USD",
-    "MATIC": "MATIC-USD", "DOT": "DOT-USD", "LTC": "LTC-USD",
-    "ATOM": "ATOM-USD", "UNI": "UNI-USD", "NEAR": "NEAR-USD"
-}
+# Liste des cryptos à surveiller (Symboles Binance)
+WATCHLIST = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ADA/USDT", 
+    "DOGE/USDT", "AVAX/USDT", "XRP/USDT", "LINK/USDT", "MATIC/USDT", 
+    "DOT/USDT", "LTC/USDT", "ATOM/USDT", "NEAR/USDT", "PEPE/USDT"
+]
 
 # ======================================================
-# 🔐 AUTH
+# 🔐 CONNEXIONS (Google + Binance)
 # ======================================================
 print("🔐 Initialisation...", flush=True)
+
+# 1. Google Sheets
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     gc = gspread.authorize(creds)
     SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-    print("✅ Auth Google OK", flush=True)
+    print("✅ Google Auth OK", flush=True)
 except Exception as e:
-    print(f"❌ Erreur Auth: {e}", flush=True)
+    print(f"❌ Erreur Google: {e}", flush=True)
+
+# 2. Binance
+exchange = None
+try:
+    if BINANCE_API_KEY and BINANCE_SECRET_KEY:
+        exchange = ccxt.binance({
+            'apiKey': BINANCE_API_KEY,
+            'secret': BINANCE_SECRET_KEY,
+            'enableRateLimit': True, # Indispensable pour éviter le ban
+            'options': {'defaultType': 'spot'}
+        })
+        print("✅ Binance Client Configured", flush=True)
+    else:
+        print("⚠️ Pas de clés Binance trouvées (Mode Simulation)", flush=True)
+except Exception as e:
+    print(f"❌ Erreur Config Binance: {e}", flush=True)
 
 # ======================================================
-# 🧠 MOTEUR
+# 🧠 MOTEUR D'ANALYSE
 # ======================================================
 
-def get_candles(product_id: str, granularity=3600):
+def get_binance_data(symbol, timeframe, limit=100):
+    """Récupère les bougies directement depuis Binance via CCXT"""
     try:
-        url = f"{CB_BASE}/products/{product_id}/candles"
-        # On tente jusqu'à 3 fois si erreur
-        for _ in range(3):
-            r = requests.get(url, params={"granularity": granularity}, timeout=10)
-            if r.status_code == 200:
-                break
-            if r.status_code == 429: # Trop rapide
-                time.sleep(2)
-            else:
-                time.sleep(1)
-        
-        if r.status_code != 200:
-            return None
-            
-        data = r.json()
-        if not data: return None
-        
-        df = pd.DataFrame(data, columns=["ts", "low", "high", "open", "close", "volume"])
-        cols = ["low", "high", "open", "close", "volume"]
-        df[cols] = df[cols].astype(float)
-        df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(None)
-        df = df.sort_values("ts").reset_index(drop=True)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
         return df
     except Exception as e:
-        print(f"⚠️ Err API {product_id}: {e}", flush=True)
+        print(f"⚠️ Erreur data {symbol}: {e}")
         return None
 
-def analyze_crypto(symbol, pid, btc_trend):
-    # 1. Récupération 1H
-    df_1h = get_candles(pid, 3600)
-    time.sleep(0.5) 
-    
-    # 2. Récupération 1D
-    df_1d = get_candles(pid, 86400)
-    time.sleep(0.5)
-    
-    if df_1h is None or df_1d is None: 
-        print(f"❌ Données manquantes pour {symbol}", flush=True)
-        return None
-    
-    # Indicateurs
-    def rsi(series):
-        delta = series.diff()
-        gain = np.where(delta > 0, delta, 0.0)
-        loss = np.where(delta < 0, -delta, 0.0)
-        rs = pd.Series(gain).rolling(14).mean() / pd.Series(loss).rolling(14).mean()
-        return 100 - (100 / (1 + rs))
+def get_user_balance():
+    """Récupère les positions actuelles de l'utilisateur"""
+    positions = {}
+    if not exchange: return positions
+    try:
+        balance = exchange.fetch_balance()
+        # On ne garde que ce qui n'est pas zéro
+        items = balance['total']
+        for asset, amount in items.items():
+            if amount > 0: # On filtre les poussières
+                # Convertir l'asset (ex: SOL) en paire (SOL/USDT) pour matcher la watchlist
+                pair = f"{asset}/USDT"
+                positions[pair] = amount
+        return positions
+    except Exception as e:
+        print(f"⚠️ Erreur Balance: {e}")
+        return {}
 
-    df_1h["RSI"] = rsi(df_1h["close"])
-    df_1h["ATR"] = (df_1h["high"] - df_1h["low"]).rolling(14).mean()
-    df_1h["EMA50"] = df_1h["close"].ewm(span=50).mean()
-    df_1d["EMA200"] = df_1d["close"].ewm(span=200).mean()
+def analyze_market_and_portfolio():
+    print("🧠 Démarrage Analyse Complète...", flush=True)
     
-    # Bollinger Squeeze (CORRECTION DU BUG ICI)
-    sma = df_1h["close"].rolling(20).mean()
-    std = df_1h["close"].rolling(20).std()
-    bandwidth = ((sma + 2*std) - (sma - 2*std)) / sma
-    # On prend juste la dernière valeur (.iloc[-1])
-    is_squeeze = bandwidth.iloc[-1] < 0.10
+    # 1. Récupérer le portefeuille réel
+    my_positions = get_user_balance()
+    if my_positions:
+        print(f"💰 Portefeuille détecté: {my_positions}", flush=True)
     
-    # Divergence
-    price_lows = df_1h["close"].iloc[-10:]
-    rsi_vals = df_1h["RSI"].iloc[-10:]
-    div = price_lows.iloc[-1] < price_lows.iloc[0] and rsi_vals.iloc[-1] > rsi_vals.iloc[0]
-
-    # Scoring
-    price = df_1h["close"].iloc[-1]
-    score = 0
-    
-    # Tendance Fond
-    trend_d1 = "🟢 HAUSSE" if price > df_1d["EMA200"].iloc[-1] else "🔴 BAISSE"
-    if trend_d1 == "🟢 HAUSSE": score += 30
-    
-    # Tendance Court terme
-    if price > df_1h["EMA50"].iloc[-1]: score += 20
-    
-    # RSI
-    cur_rsi = df_1h["RSI"].iloc[-1]
-    if 40 < cur_rsi < 65: score += 20
-    
-    # Bonus
-    if div: score += 15
-    if is_squeeze: score += 15
-    
-    # Pénalité BTC
-    if symbol != "BTC" and btc_trend == "BEAR":
-        score = max(0, score - 30)
-
-    # Signal Textuel
-    signal = "⚪ NEUTRE"
-    if score >= 75: signal = "🟢 ACHAT FORT"
-    elif score >= 50: signal = "🟡 ACHAT FAIBLE"
-    elif score <= 20: signal = "🔴 VENTE FORT"
-    elif score < 40: signal = "🟠 VENTE"
-    
-    if trend_d1 == "🔴 BAISSE" and score > 60: signal = "⚠️ REBOND"
-
-    # Position Sizing
-    sl = price - (df_1h["ATR"].iloc[-1] * 2)
-    tp = price + (df_1h["ATR"].iloc[-1] * 2.5)
-    risk_usd = TOTAL_CAPITAL * RISK_PER_TRADE_PCT
-    if btc_trend == "BEAR" and symbol != "BTC": risk_usd /= 2
-    
-    pos_usd = 0
-    if (price - sl) > 0 and "ACHAT" in signal:
-        pos_usd = min((risk_usd / (price - sl)) * price, TOTAL_CAPITAL * 0.15)
-
-    return {
-        "Crypto": symbol, "Prix": price, "Signal": signal, "Score": score,
-        "Tendance_Fond": trend_d1, "Pos_USD": round(pos_usd), 
-        "Stop_Loss": round(sl, 4), "Take_Profit": round(tp, 4),
-        "RSI": round(cur_rsi, 1), "Divergence": "✅ OUI" if div else "",
-        "Squeeze": "💥 PRÊT" if is_squeeze else ""
-    }
-
-def update_sheet():
-    print("🧠 Démarrage Analyse...", flush=True)
-    
-    # 1. Check BTC
-    btc_df = get_candles(PRODUCTS["BTC"], 86400)
-    btc_trend = "NEUTRE"
-    if btc_df is not None:
-        ma200 = btc_df["close"].ewm(span=200).mean().iloc[-1]
-        btc_trend = "BULL" if btc_df["close"].iloc[-1] > ma200 else "BEAR"
-    print(f"👑 BTC Global: {btc_trend}", flush=True)
-
     results = []
-    for sym, pid in PRODUCTS.items():
-        print(f"👉 Scan {sym}...", flush=True)
-        res = analyze_crypto(sym, pid, btc_trend)
-        if res:
-            results.append(res)
-            print(f"   ✅ {sym}: {res['Signal']}")
-        else:
-            print(f"   ⚠️ Echec {sym}")
+    
+    # 2. Vérifier la tendance BTC (King Maker)
+    btc_df = get_binance_data("BTC/USDT", "1d", limit=200)
+    market_trend = "NEUTRE"
+    if btc_df is not None:
+        ma200 = btc_df['close'].ewm(span=200).mean().iloc[-1]
+        market_trend = "BULL" if btc_df['close'].iloc[-1] > ma200 else "BEAR"
+    
+    print(f"👑 Tendance Marché (BTC): {market_trend}", flush=True)
 
+    # 3. Analyser chaque crypto
+    for symbol in WATCHLIST:
+        print(f"👉 Scan {symbol}...", flush=True)
+        
+        # Données
+        df_1h = get_binance_data(symbol, "1h")
+        df_1d = get_binance_data(symbol, "1d")
+        
+        if df_1h is None or df_1d is None: continue
+        
+        # --- CALCULS ---
+        current_price = df_1h['close'].iloc[-1]
+        
+        # RSI
+        delta = df_1h['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+        
+        # Moyennes Mobiles
+        ema50_1h = df_1h['close'].ewm(span=50).mean().iloc[-1]
+        ema200_1d = df_1d['close'].ewm(span=200).mean().iloc[-1]
+        
+        # Score Technique
+        score = 0
+        trend_fond = "🔴 BAISSE"
+        if current_price > ema200_1d:
+            score += 30
+            trend_fond = "🟢 HAUSSE"
+        if current_price > ema50_1h: score += 20
+        if 40 < current_rsi < 65: score += 20
+        
+        # --- LOGIQUE INTELLIGENTE (PORTFOLIO AWARE) ---
+        user_owns_it = symbol in my_positions
+        amount_owned = my_positions.get(symbol, 0)
+        value_owned = amount_owned * current_price
+        
+        advice = "⚪ NEUTRE"
+        action_required = ""
+        
+        # Cas 1 : Je possède la crypto (Ex: Tes SOL)
+        if user_owns_it and value_owned > 10: # Seuil min 10$
+            if trend_fond == "🔴 BAISSE" and score < 40:
+                advice = "🚨 VENDRE (Protection)"
+                action_required = "URGENT"
+            elif score > 60:
+                advice = "🟢 GARDER (Hold)"
+            else:
+                advice = "🟠 SURVEILLER"
+                
+        # Cas 2 : Je ne possède pas la crypto
+        else:
+            if market_trend == "BEAR":
+                advice = "⛔ ATTENDRE (Marché Bear)"
+            elif score > 75:
+                advice = "🚀 ACHETER"
+                
+        # --- OUTPUT ---
+        results.append({
+            "Crypto": symbol,
+            "Prix": current_price,
+            "J'en ai ?": f"✅ {round(value_owned,1)}$" if value_owned > 10 else "❌",
+            "Conseil IA": advice,
+            "Action": action_required,
+            "Trend_Fond": trend_fond,
+            "Score": score,
+            "RSI": round(current_rsi, 1)
+        })
+
+    # 4. Ecriture Sheet
     if results:
         try:
             sh = gc.open_by_key(SHEET_ID)
-            try: ws = sh.worksheet("MultiTF")
-            except: ws = sh.add_worksheet("MultiTF", 100, 20)
+            try: ws = sh.worksheet("PortfolioManager")
+            except: ws = sh.add_worksheet("PortfolioManager", 100, 20)
             
             df = pd.DataFrame(results)
-            cols = ["Crypto", "Prix", "Signal", "Score", "Tendance_Fond", 
-                    "Pos_USD", "Stop_Loss", "Take_Profit", "RSI", 
-                    "Divergence", "Squeeze"]
-            df["Update"] = datetime.now(timezone.utc).strftime("%H:%M")
+            # Tri intelligent : Les actions urgentes en haut
+            df = df.sort_values(by="Action", ascending=False) 
             
+            df["Update"] = datetime.now(timezone.utc).strftime("%H:%M")
             ws.clear()
-            set_with_dataframe(ws, df[cols + ["Update"]])
-            print("🚀 Google Sheet mis à jour !", flush=True)
+            set_with_dataframe(ws, df)
+            print("🚀 Google Sheet mis à jour (Mode Binance)", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
-    else:
-        print("❌ Aucun résultat trouvé (problème API ?)", flush=True)
 
+# ======================================================
+# 🔄 SERVER
+# ======================================================
 def run_bot():
-    update_sheet()
+    analyze_market_and_portfolio()
     while True:
         time.sleep(3600)
-        update_sheet()
+        analyze_market_and_portfolio()
 
 def keep_alive():
     url = os.getenv("RENDER_EXTERNAL_URL")
@@ -219,7 +223,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V4.1 Stable"
+def index(): return "Binance Portfolio Bot Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
