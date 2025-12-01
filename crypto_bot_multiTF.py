@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 import os
 import json
-import math
 import gspread
 from datetime import datetime, timezone
 from google.oauth2.service_account import Credentials
@@ -15,81 +14,66 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION & CONSTANTES
+# ⚙️ CONFIGURATION PRO
 # ======================================================
-# Capital total fictif pour le calcul de position (à ajuster)
 TOTAL_CAPITAL = 10000 
-# Risque max par trade (1% du capital)
 RISK_PER_TRADE_PCT = 0.01 
 
 CB_BASE = "https://api.exchange.coinbase.com"
+# On analyse le BTC en premier (obligatoire)
 PRODUCTS = {
     "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
     "BNB": "BNB-USD", "ADA": "ADA-USD", "DOGE": "DOGE-USD",
     "AVAX": "AVAX-USD", "XRP": "XRP-USD", "LINK": "LINK-USD",
     "MATIC": "MATIC-USD", "DOT": "DOT-USD", "LTC": "LTC-USD",
-    "ATOM": "ATOM-USD", "UNI": "UNI-USD", "NEAR": "NEAR-USD"
+    "ATOM": "ATOM-USD", "UNI": "UNI-USD", "NEAR": "NEAR-USD",
+    "AAVE": "AAVE-USD", "ALGO": "ALGO-USD"
 }
 
 # ======================================================
-# 🔐 AUTHENTIFICATION GOOGLE
+# 🔐 AUTHENTIFICATION
 # ======================================================
-print("🔐 Initialisation des credentials Google...", flush=True)
+print("🔐 Initialisation...", flush=True)
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     gc = gspread.authorize(creds)
     SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-    print("✅ Credentials Google OK", flush=True)
+    print("✅ Google Auth OK", flush=True)
 except Exception as e:
-    print(f"❌ Erreur credentials Google : {e}", flush=True)
-    # On ne quitte pas brutalement pour laisser le serveur web tourner
-    pass
+    print(f"❌ Erreur Auth: {e}", flush=True)
 
 # ======================================================
-# 🧠 MOTEUR D'ANALYSE TECHNIQUE
+# 🧠 MOTEUR D'ANALYSE
 # ======================================================
 
-def get_candles(product_id: str, granularity=3600, limit=300):
-    """Récupère les bougies avec gestion d'erreur robuste."""
+def get_candles(product_id: str, granularity=3600):
     try:
         url = f"{CB_BASE}/products/{product_id}/candles"
-        # Granularité: 3600=1h, 21600=6h, 86400=1d
         r = requests.get(url, params={"granularity": granularity}, timeout=10)
         
         if r.status_code == 429:
-            print(f"⚠️ Rate Limit Coinbase sur {product_id}, pause 2s...", flush=True)
             time.sleep(2)
             return None
         if r.status_code != 200:
-            # print(f"⚠️ Erreur API {product_id}: {r.status_code}", flush=True)
             return None
             
         data = r.json()
-        if not data:
-            return None
+        if not data: return None
         
         df = pd.DataFrame(data, columns=["ts", "low", "high", "open", "close", "volume"])
         
-        # --- CORRECTION DU BUG ICI ---
-        # 1. On convertit d'abord les colonnes numériques
-        numeric_cols = ["low", "high", "open", "close", "volume"]
-        df[numeric_cols] = df[numeric_cols].astype(float)
-        
-        # 2. Ensuite on gère la date
+        # Conversion robuste
+        cols = ["low", "high", "open", "close", "volume"]
+        df[cols] = df[cols].astype(float)
         df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(None)
-        
-        # 3. On trie
         df = df.sort_values("ts").reset_index(drop=True)
-        
         return df
-        
-    except Exception as e:
-        print(f"⚠️ Erreur get_candles({product_id}): {e}", flush=True)
+    except Exception:
         return None
 
-# --- Indicateurs Mathématiques ---
+# --- Indicateurs ---
 def rsi(series, period=14):
     delta = series.diff()
     gain = np.where(delta > 0, delta, 0.0)
@@ -107,197 +91,193 @@ def atr(df, period=14):
     high_close = np.abs(df["high"] - df["close"].shift())
     low_close = np.abs(df["low"] - df["close"].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(period).mean()
+    return ranges.max(axis=1).rolling(period).mean()
 
-def bollinger_squeeze(df, period=20):
-    """Détecte si la volatilité est compressée (signe de mouvement imminent)."""
-    sma = df["close"].rolling(period).mean()
-    std = df["close"].rolling(period).std()
+def bollinger_squeeze(df):
+    sma = df["close"].rolling(20).mean()
+    std = df["close"].rolling(20).std()
     upper = sma + (2 * std)
     lower = sma - (2 * std)
-    
-    # Évite la division par zéro
-    if sma.iloc[-1] == 0: return 0, False
-    
+    if sma.iloc[-1] == 0: return False
     bandwidth = (upper - lower) / sma
-    # Si la largeur de bande est historiquement basse (< 10% environ pour crypto)
-    is_squeeze = bandwidth < 0.10 
-    return bandwidth, is_squeeze
+    return bandwidth < 0.10 
 
-def detect_divergence(df, rsi_col="RSI14"):
-    """Détection basique de divergence haussière (Prix bas + RSI haut)."""
+def detect_divergence(df):
     if len(df) < 15: return False
-    # On regarde les 10 dernières bougies
     price = df["close"].iloc[-10:]
-    rsi_vals = df[rsi_col].iloc[-10:]
-    
-    # Logique simplifiée : Prix fait un plus bas, mais RSI ne fait pas de plus bas
+    rsi_vals = df["RSI14"].iloc[-10:]
+    # Prix fait un plus bas, RSI fait un plus haut (Divergence Bull)
     if price.iloc[-1] < price.iloc[0] and rsi_vals.iloc[-1] > rsi_vals.iloc[0]:
-        return True # Divergence Haussière Potentielle
+        return True
     return False
 
 # ======================================================
-# 📊 LOGIQUE DE TRADING & RISQUE
+# 📊 ANALYSE INTELLIGENTE
 # ======================================================
 
+# Variable globale pour stocker la tendance du Roi Bitcoin
+BTC_MARKET_STATE = "NEUTRE"
+
+def analyze_market_context():
+    """Analyse le BTC pour définir l'état global du marché."""
+    global BTC_MARKET_STATE
+    df_day = get_candles(PRODUCTS["BTC"], granularity=86400)
+    if df_day is not None:
+        df_day["EMA200"] = ema(df_day["close"], 200)
+        price = df_day["close"].iloc[-1]
+        ma200 = df_day["EMA200"].iloc[-1]
+        
+        if price > ma200:
+            BTC_MARKET_STATE = "BULL"
+        else:
+            BTC_MARKET_STATE = "BEAR"
+        print(f"👑 TENDANCE GLOBALE BITCOIN: {BTC_MARKET_STATE}", flush=True)
+
 def analyze_crypto(symbol, pid):
-    """Analyse complète multi-timeframe pour une crypto."""
+    # Récupération Données
+    df_1h = get_candles(pid, 3600)
+    df_1d = get_candles(pid, 86400)
     
-    # 1. Récupération des données (1H, 6H, 1D)
-    tf_configs = {"1h": 3600, "6h": 21600, "1d": 86400}
-    data_store = {}
+    if df_1h is None or df_1d is None: return None
     
-    for tf_name, granularity in tf_configs.items():
-        df = get_candles(pid, granularity=granularity)
-        if df is None: continue
-        
-        # Calculs Indicateurs
-        df["EMA20"] = ema(df["close"], 20)
-        df["EMA50"] = ema(df["close"], 50)
-        df["EMA200"] = ema(df["close"], 200)
-        df["RSI14"] = rsi(df["close"], 14)
-        df["ATR14"] = atr(df, 14)
-        
-        # Bollinger Squeeze
-        df["BB_Width"], df["Squeeze"] = bollinger_squeeze(df)
-        
-        data_store[tf_name] = df
-        time.sleep(0.4) # Petit délai API pour éviter le Rate Limit
-
-    # On a besoin au minimum du 1H et du 1D pour décider
-    if "1h" not in data_store or "1d" not in data_store:
-        return None
-
-    # 2. Analyse Multi-Timeframe
-    df_1h = data_store["1h"]
-    df_1d = data_store["1d"]
+    # Calculs
+    df_1h["RSI14"] = rsi(df_1h["close"], 14)
+    df_1h["ATR14"] = atr(df_1h, 14)
+    df_1h["EMA50"] = ema(df_1h["close"], 50)
+    df_1d["EMA200"] = ema(df_1d["close"], 200)
+    
+    # Indicateurs avancés
+    squeeze = bollinger_squeeze(df_1h)
+    div = detect_divergence(df_1h)
     
     current_price = df_1h["close"].iloc[-1]
-    atr_1h = df_1h["ATR14"].iloc[-1]
-    rsi_1h = df_1h["RSI14"].iloc[-1]
     
-    # --- FILTRES DE TENDANCE (VETO) ---
-    # Si on est sous la EMA200 Daily, tendance de fond baissière
-    trend_long = "BEAR" if df_1d["close"].iloc[-1] < df_1d["EMA200"].iloc[-1] else "BULL"
-    
-    # --- CALCUL SCORE (0-100) ---
+    # --- LOGIQUE DE SCORE ---
     score = 0
+    # 1. Tendance de fond (Daily)
+    is_bull_d1 = current_price > df_1d["EMA200"].iloc[-1]
+    if is_bull_d1: score += 30
     
-    # Tendance 1D (+30pts)
-    if trend_long == "BULL": score += 30
+    # 2. Tendance court terme (1H)
+    is_bull_h1 = current_price > df_1h["EMA50"].iloc[-1]
+    if is_bull_h1: score += 20
     
-    # Tendance 1H (+20pts) - Alignement court terme
-    if df_1h["close"].iloc[-1] > df_1h["EMA50"].iloc[-1]: score += 20
+    # 3. RSI Propre
+    rsi_val = df_1h["RSI14"].iloc[-1]
+    if 40 < rsi_val < 65: score += 20
     
-    # Momentum RSI (+20pts)
-    if 45 < rsi_1h < 65: score += 20 # Zone de poussée saine
+    # 4. Bonus "Sniper"
+    if div: score += 15
+    if squeeze: score += 15
     
-    # Divergence (+15pts)
-    has_divergence = detect_divergence(df_1h)
-    if has_divergence: score += 15
-    
-    # Volatilité Squeeze (+15pts)
-    is_squeezing = df_1h["Squeeze"].iloc[-1]
-    if is_squeezing: score += 15
+    # --- FILTRE BTC (Le plus important) ---
+    # Si BTC est Bearish, on pénalise lourdement le score des Alts
+    if symbol != "BTC" and BTC_MARKET_STATE == "BEAR":
+        score -= 30 # Pénalité de marché baissier
+        if score < 0: score = 0
 
-    # --- GESTION DU RISQUE PRO ---
-    # Stop Loss Technique : Sous le dernier creux significatif ou via ATR
-    # Ici méthode ATR "Chandelier Exit" : 2.5 x ATR
-    sl_dist = atr_1h * 2.5
-    stop_loss_price = current_price - sl_dist
-    take_profit_price = current_price + (sl_dist * 2) # Ratio 1:2
+    # --- SIGNAL VISUEL ---
+    trend_str = "🟢 HAUSSE" if is_bull_d1 else "🔴 BAISSE"
     
-    # Position Sizing : Combien de tokens acheter ?
-    # Formule : (Capital * %Risque) / (Prix Entrée - Prix SL)
-    risk_amount_usd = TOTAL_CAPITAL * RISK_PER_TRADE_PCT # ex: 100$
-    price_diff = current_price - stop_loss_price
+    signal = "⚪ NEUTRE"
+    if score >= 75: signal = "🟢 ACHAT FORT"
+    elif score >= 50: signal = "🟡 ACHAT FAIBLE"
+    elif score <= 20: signal = "🔴 VENTE FORT"
+    elif score < 40: signal = "🟠 VENTE"
     
-    if price_diff > 0:
-        position_size_tokens = risk_amount_usd / price_diff
-        position_size_usd = position_size_tokens * current_price
-    else:
-        position_size_usd = 0 # Erreur de calcul ou SL > Prix
+    # Rebond technique en marché baissier (Risqué)
+    if trend_str == "🔴 BAISSE" and score > 60:
+        signal = "⚠️ REBOND (RISQUE)"
+
+    # --- VISUALISATION ---
+    rsi_str = f"{round(rsi_val, 0)}"
+    if rsi_val > 70: rsi_str += " 🔥" # Surchauffe
+    elif rsi_val < 30: rsi_str += " 🧊" # Survente
+
+    div_str = "✅ OUI" if div else ""
+    squeeze_str = "💥 PRÊT" if squeeze else ""
+
+    # --- MONEY MANAGEMENT ---
+    sl_dist = df_1h["ATR14"].iloc[-1] * 2.0
+    sl_price = current_price - sl_dist
+    tp_price = current_price + (sl_dist * 2.5) # Ratio 2.5
+    
+    # Taille de position
+    risk_usd = TOTAL_CAPITAL * RISK_PER_TRADE_PCT
+    if symbol != "BTC" and BTC_MARKET_STATE == "BEAR":
+        risk_usd = risk_usd / 2 # On divise le risque par 2 si le marché est mauvais
         
-    # Limite de sécurité sur la taille de position (max 20% du capital total sur un trade)
-    position_size_usd = min(position_size_usd, TOTAL_CAPITAL * 0.20)
-
-    # --- SIGNAL FINAL ---
-    signal = "NEUTRE"
-    if score >= 70 and trend_long == "BULL": signal = "ACHAT FORT"
-    elif score >= 50 and trend_long == "BULL": signal = "ACHAT FAIBLE"
-    elif score < 30: signal = "VENTE"
-    if trend_long == "BEAR" and score > 60: signal = "REBOND (RISQUÉ)"
+    diff = current_price - sl_price
+    pos_usd = 0
+    if diff > 0:
+        pos_tokens = risk_usd / diff
+        pos_usd = pos_tokens * current_price
+        
+    # Limite max par sécurité
+    pos_usd = min(pos_usd, TOTAL_CAPITAL * 0.15)
+    
+    # Pas de position d'achat si le signal est vente
+    if "VENTE" in signal or "NEUTRE" in signal:
+        pos_usd = 0
 
     return {
         "Crypto": symbol,
         "Prix": current_price,
-        "Trend_D1": trend_long,
-        "Score": score,
         "Signal": signal,
-        "RSI_1H": round(rsi_1h, 1),
-        "Divergence": "OUI" if has_divergence else "NON",
-        "Squeeze": "OUI" if is_squeezing else "NON",
-        "Stop_Loss": round(stop_loss_price, 4),
-        "Take_Profit": round(take_profit_price, 4),
-        "Position_USD": round(position_size_usd, 0), # Le montant à investir
-        "Risk_Reward": "1:2"
+        "Score": score,
+        "Tendance_Fond": trend_str,
+        "Pos_Suggérée_USD": round(pos_usd, 0),
+        "Stop_Loss": round(sl_price, 4),
+        "Take_Profit": round(tp_price, 4),
+        "RSI": rsi_str,
+        "Div_Bull": div_str,
+        "Squeeze": squeeze_str
     }
 
 # ======================================================
-# 🔄 BOUCLE PRINCIPALE & EXPORT
+# 🔄 UPDATE SHEET
 # ======================================================
 def update_sheet():
-    print("🧠 Début analyse marché...", flush=True)
+    print("🧠 Scan marché...", flush=True)
+    analyze_market_context() # D'abord le BTC !
+    
     try:
         sh = gc.open_by_key(SHEET_ID)
-        try:
-            ws = sh.worksheet("MultiTF") # Utilise l'onglet existant
-        except:
-            ws = sh.add_worksheet(title="MultiTF", rows="100", cols="20")
+        try: ws = sh.worksheet("MultiTF")
+        except: ws = sh.add_worksheet("MultiTF", 100, 20)
             
         results = []
         for sym, pid in PRODUCTS.items():
-            print(f"👉 Analyse {sym}...", flush=True)
+            time.sleep(0.5) # Anti-ban
             data = analyze_crypto(sym, pid)
             if data:
+                print(f"{sym}: {data['Signal']} (Score: {data['Score']})")
                 results.append(data)
-                print(f"   ✅ {sym} Score: {data['Score']}/100 - Signal: {data['Signal']}")
-            
-        if not results: 
-            print("⚠️ Aucun résultat à écrire.", flush=True)
-            return
 
-        df_out = pd.DataFrame(results)
-        # Réorganiser les colonnes pour la lisibilité
-        cols = ["Crypto", "Prix", "Signal", "Score", "Trend_D1", "Position_USD", 
-                "Stop_Loss", "Take_Profit", "RSI_1H", "Divergence", "Squeeze"]
-        # On s'assure que toutes les colonnes existent
-        for c in cols:
-            if c not in df_out.columns: df_out[c] = ""
+        if results:
+            df = pd.DataFrame(results)
+            # Colonnes propres
+            cols = ["Crypto", "Prix", "Signal", "Score", "Tendance_Fond", 
+                    "Pos_Suggérée_USD", "Stop_Loss", "Take_Profit", 
+                    "RSI", "Div_Bull", "Squeeze"]
             
-        df_out = df_out[cols]
-        
-        # Ajout timestamp
-        df_out["Update"] = datetime.now(timezone.utc).strftime("%H:%M")
-
-        ws.clear()
-        set_with_dataframe(ws, df_out)
-        print("✅ Google Sheet mis à jour avec succès.", flush=True)
+            # Ajout Timestamp
+            df["Mise_à_jour"] = datetime.now(timezone.utc).strftime("%H:%M")
+            
+            ws.clear()
+            set_with_dataframe(ws, df[cols + ["Mise_à_jour"]])
+            print("✅ Sheet mis à jour (Version Visuelle)")
 
     except Exception as e:
-        print(f"❌ Erreur update_sheet(): {e}", flush=True)
+        print(f"❌ Erreur: {e}")
 
 def run_bot():
-    print("🚀 Lancement du bot...", flush=True)
     update_sheet()
     while True:
-        print("⏳ Pause 1h...", flush=True)
         time.sleep(3600)
         update_sheet()
 
 def keep_alive():
-    # Petit serveur web pour que Render ne coupe pas le bot
     url = os.getenv("RENDER_EXTERNAL_URL")
     if url:
         while True:
@@ -306,7 +286,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot Actif"
+def index(): return "Bot Trading Pro V3"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
