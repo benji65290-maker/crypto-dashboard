@@ -4,6 +4,7 @@ numpy
 gspread
 gspread-dataframe
 google-auth
+ccxt
 flask
 pytz
 pytrends
