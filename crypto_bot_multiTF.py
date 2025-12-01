@@ -78,11 +78,11 @@ def get_candles(product_id: str, granularity=3600):
 def analyze_crypto(symbol, pid, btc_trend):
     # 1. Récupération 1H
     df_1h = get_candles(pid, 3600)
-    time.sleep(0.6) # Pause obligatoire anti-ban
+    time.sleep(0.5) 
     
     # 2. Récupération 1D
     df_1d = get_candles(pid, 86400)
-    time.sleep(0.6) # Pause obligatoire
+    time.sleep(0.5)
     
     if df_1h is None or df_1d is None: 
         print(f"❌ Données manquantes pour {symbol}", flush=True)
@@ -101,10 +101,12 @@ def analyze_crypto(symbol, pid, btc_trend):
     df_1h["EMA50"] = df_1h["close"].ewm(span=50).mean()
     df_1d["EMA200"] = df_1d["close"].ewm(span=200).mean()
     
-    # Bollinger Squeeze
+    # Bollinger Squeeze (CORRECTION DU BUG ICI)
     sma = df_1h["close"].rolling(20).mean()
     std = df_1h["close"].rolling(20).std()
-    squeeze = ((sma + 2*std) - (sma - 2*std)) / sma < 0.10
+    bandwidth = ((sma + 2*std) - (sma - 2*std)) / sma
+    # On prend juste la dernière valeur (.iloc[-1])
+    is_squeeze = bandwidth.iloc[-1] < 0.10
     
     # Divergence
     price_lows = df_1h["close"].iloc[-10:]
@@ -128,7 +130,7 @@ def analyze_crypto(symbol, pid, btc_trend):
     
     # Bonus
     if div: score += 15
-    if squeeze: score += 15
+    if is_squeeze: score += 15
     
     # Pénalité BTC
     if symbol != "BTC" and btc_trend == "BEAR":
@@ -158,7 +160,7 @@ def analyze_crypto(symbol, pid, btc_trend):
         "Tendance_Fond": trend_d1, "Pos_USD": round(pos_usd), 
         "Stop_Loss": round(sl, 4), "Take_Profit": round(tp, 4),
         "RSI": round(cur_rsi, 1), "Divergence": "✅ OUI" if div else "",
-        "Squeeze": "💥 PRÊT" if squeeze else ""
+        "Squeeze": "💥 PRÊT" if is_squeeze else ""
     }
 
 def update_sheet():
@@ -217,7 +219,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V4 Stable"
+def index(): return "Bot V4.1 Stable"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
