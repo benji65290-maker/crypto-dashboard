@@ -34,7 +34,7 @@ WATCHLIST = [
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V12 (Hedge Fund)...", flush=True)
+print("🔐 Initialisation V13 (Institutionnel)...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -78,10 +78,10 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🏛️ Hedge Fund Bot V12",
+                "title": "🏛️ Institutionnel V13",
                 "description": message,
                 "color": color_code,
-                "footer": {"text": "Analyse Multi-Timeframe & Macro"}
+                "footer": {"text": "Order Flow & Sentiment Analysis"}
             }]
         }
         requests.post(DISCORD_WEBHOOK_URL, json=data)
@@ -111,12 +111,10 @@ def get_portfolio_data():
         tickers = exchange.fetch_tickers() 
         balance = exchange.fetch_balance()
         
-        # 1. Cash (USDT + USDC)
         usdt = balance['total'].get('USDT', 0)
         usdc = balance['total'].get('USDC', 0)
         cash_usd = usdt + usdc
         
-        # 2. Positions Crypto
         for asset, amount in balance['total'].items():
             if amount > 0 and asset not in ["USDT", "USDC"]:
                 price = 0
@@ -127,7 +125,7 @@ def get_portfolio_data():
                 elif pair_usdt in tickers: price = tickers[pair_usdt]['last']
                 
                 val_usd = amount * price
-                if val_usd > 1: # Filtre poussières
+                if val_usd > 1:
                     total_equity_usd += val_usd
                     positions[f"{asset}/USDC"] = amount
         
@@ -138,7 +136,59 @@ def get_portfolio_data():
         return {}, 0, 10000
 
 # ======================================================
-# 📜 GESTION HISTORIQUE & PNL
+# 🌊 DATA INSTITUTIONNELLES (Sentiment & Order Book)
+# ======================================================
+
+def get_fear_and_greed():
+    """Récupère l'indice de peur du marché (0-100)"""
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+        data = r.json()
+        val = int(data['data'][0]['value'])
+        classification = data['data'][0]['value_classification']
+        return val, classification
+    except:
+        return 50, "Neutral"
+
+def get_order_book_pressure(symbol):
+    """
+    Analyse le carnet d'ordres pour voir qui domine (Acheteurs vs Vendeurs).
+    Retourne un ratio : > 1.0 = Pression Acheteuse, < 1.0 = Pression Vendeuse
+    """
+    try:
+        # On regarde les 20 meilleurs ordres
+        book = exchange.fetch_order_book(symbol, limit=20)
+        bid_vol = sum([bid[1] for bid in book['bids']]) # Volume Achat
+        ask_vol = sum([ask[1] for ask in book['asks']]) # Volume Vente
+        
+        if ask_vol == 0: return 1.0
+        ratio = bid_vol / ask_vol
+        return ratio
+    except:
+        return 1.0
+
+def get_fibonacci_support(df_1d):
+    """Calcule le prochain support majeur (Retracement Fibonacci)"""
+    try:
+        # On prend le plus haut et plus bas des 3 derniers mois (approx 90j)
+        recent_high = df_1d['high'].tail(90).max()
+        recent_low = df_1d['low'].tail(90).min()
+        
+        # Niveaux Fibo standards
+        diff = recent_high - recent_low
+        fib_0618 = recent_high - (diff * 0.618) # Le niveau "Golden Pocket"
+        fib_0786 = recent_high - (diff * 0.786)
+        
+        current_price = df_1d['close'].iloc[-1]
+        
+        # On cherche le support juste en dessous du prix actuel
+        if current_price > fib_0618: return fib_0618
+        else: return fib_0786
+    except:
+        return 0
+
+# ======================================================
+# 📜 GESTION HISTORIQUE
 # ======================================================
 def check_history_and_alert(symbol, new_action, new_advice, price, reason):
     try:
@@ -148,7 +198,6 @@ def check_history_and_alert(symbol, new_action, new_advice, price, reason):
 
         records = ws_hist.get_all_records()
         last_signal = "AUCUN"
-        
         for row in reversed(records):
             if row.get("Crypto") == symbol:
                 last_signal = row.get("Nouveau_Signal")
@@ -158,11 +207,9 @@ def check_history_and_alert(symbol, new_action, new_advice, price, reason):
         color = 0x95a5a6
 
         if new_action == "URGENT" and "URGENT" not in last_signal:
-            is_alert_worthy = True
-            color = 0xe74c3c # Rouge
+            is_alert_worthy = True; color = 0xe74c3c
         elif "ACHAT FORT" in new_advice and "ACHAT FORT" not in last_signal:
-            is_alert_worthy = True
-            color = 0x2ecc71 # Vert
+            is_alert_worthy = True; color = 0x2ecc71
             
         if is_alert_worthy:
             paris_tz = pytz.timezone('Europe/Paris')
@@ -170,51 +217,42 @@ def check_history_and_alert(symbol, new_action, new_advice, price, reason):
             ws_hist.append_row([now_str, symbol, smart_format(price), last_signal, f"{new_action} {new_advice}", reason])
             msg = f"**{symbol}** : {new_action} {new_advice}\n💰 Prix: {smart_format(price)}\n🧠 Raison: {reason}"
             send_discord_alert(msg, color)
-            print(f"🔔 Alerte envoyée pour {symbol}")
+            print(f"🔔 Alerte pour {symbol}")
 
     except Exception as e:
         print(f"⚠️ Erreur Journal: {e}")
 
 # ======================================================
-# 🧠 INDICATEURS AVANCÉS (V12)
+# 🧠 INDICATEURS TECHNIQUES
 # ======================================================
 def calculate_advanced_indicators(symbol):
-    # On récupère 3 timeframes
     df_1h = get_binance_data(symbol, "1h")
-    df_4h = get_binance_data(symbol, "4h") # Nouveau
-    df_1d = get_binance_data(symbol, "1d")
+    df_4h = get_binance_data(symbol, "4h")
+    df_1d = get_binance_data(symbol, "1d", limit=200) # Besoin de plus d'historique pour Fibo
     
     if df_1h is None or df_4h is None or df_1d is None: return None
 
-    # --- Indicateurs 1H ---
+    # RSI 1H
     delta = df_1h['close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    rs = gain.rolling(14).mean() / loss.rolling(14).mean()
+    rs = delta.where(delta>0,0).rolling(14).mean() / (-delta.where(delta<0,0)).rolling(14).mean()
     rsi_1h = 100 - (100 / (1 + rs))
     
     # ADX 1H
-    tr1 = df_1h['high'] - df_1h['low']
-    tr2 = abs(df_1h['high'] - df_1h['close'].shift(1))
-    tr3 = abs(df_1h['low'] - df_1h['close'].shift(1))
-    atr_1h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(14).mean()
-    
-    plus_dm = df_1h['high'].diff()
-    minus_dm = df_1h['low'].diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr_1h)
-    minus_di = 100 * (abs(minus_dm).ewm(alpha=1/14).mean() / atr_1h)
-    dx = (abs(plus_di - minus_di) / abs(plus_di + minus_di)) * 100
-    adx_1h = dx.rolling(14).mean()
+    tr = pd.concat([df_1h['high']-df_1h['low'], abs(df_1h['high']-df_1h['close'].shift(1)), abs(df_1h['low']-df_1h['close'].shift(1))], axis=1).max(axis=1).rolling(14).mean()
+    atr_1h = tr
+    plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14).mean() / atr_1h)
+    minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14).mean() / atr_1h)
+    adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14).mean()
 
-    # --- Indicateurs 4H & 1D (Trend Filters) ---
+    # Trends
     ema50_4h = df_4h['close'].ewm(span=50).mean().iloc[-1]
     ema200_1d = df_1d['close'].ewm(span=200).mean().iloc[-1]
 
-    # Volumes
-    vol_mean = df_1h['volume'].rolling(20).mean().iloc[-1]
-    vol_cur = df_1h['volume'].iloc[-1]
+    # Nouveau: Order Book Pressure
+    ob_ratio = get_order_book_pressure(symbol)
+    
+    # Nouveau: Fibo Support
+    fibo_support = get_fibonacci_support(df_1d)
 
     return {
         "rsi_1h": rsi_1h.iloc[-1],
@@ -222,127 +260,86 @@ def calculate_advanced_indicators(symbol):
         "atr_1h": atr_1h.iloc[-1],
         "ema50_4h": ema50_4h,
         "ema200_1d": ema200_1d,
-        "vol_ratio": vol_cur / vol_mean if vol_mean > 0 else 0,
-        "price_4h": df_4h['close'].iloc[-1] # Prix clôture 4h
+        "ob_ratio": ob_ratio,
+        "fibo_support": fibo_support
     }
 
-def analyze_market_health():
-    """Analyse la santé globale du marché (Macro)"""
-    # 1. Tendance BTC
-    btc_df = get_binance_data("BTC/USDC", "1d", limit=200)
-    btc_trend = "NEUTRE"
-    if btc_df is not None:
-        ma200 = btc_df['close'].ewm(span=200).mean().iloc[-1]
-        btc_trend = "BULL" if btc_df['close'].iloc[-1] > ma200 else "BEAR"
-        
-    # 2. Tendance ETH/BTC (Force des Alts)
-    eth_btc_df = get_binance_data("ETH/BTC", "1d", limit=100)
-    alt_season = False
-    if eth_btc_df is not None:
-        ma50 = eth_btc_df['close'].ewm(span=50).mean().iloc[-1]
-        if eth_btc_df['close'].iloc[-1] > ma50:
-            alt_season = True # Les Alts surperforment BTC
-
-    return btc_trend, alt_season
-
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V12 Hedge Fund...", flush=True)
+    print("🧠 Analyse V13...", flush=True)
     my_positions, cash_available, total_capital = get_portfolio_data()
-    print(f"💰 Cash: {smart_format(cash_available)} | Total: {smart_format(total_capital)}")
     
-    btc_trend, alt_season = analyze_market_health()
-    print(f"👑 Macro: BTC={btc_trend} | Alts={alt_season}", flush=True)
+    # Macro Data
+    btc_df = get_binance_data("BTC/USDC", "1d", limit=200)
+    btc_trend = "BULL" if btc_df['close'].iloc[-1] > btc_df['close'].ewm(span=200).mean().iloc[-1] else "BEAR"
+    
+    fng_val, fng_class = get_fear_and_greed()
+    print(f"💰 Cash: {smart_format(cash_available)} | Sentiment: {fng_val} ({fng_class})")
 
     results = []
     
     # Ligne 1 : Trésorerie
     results.append({
         "Crypto": "💰 TRÉSORERIE",
-        "Prix": "-",
-        "Mon_Bag": smart_format(cash_available),
-        "Conseil": "LIQUIDITÉS",
-        "Action": "",
-        "Score": 1000,
-        "Trend 1D": "-",
-        "Trend 4H": "-",
-        "RSI": "-",
-        "Analyse Complète 🧠": f"Capital prêt: {smart_format(cash_available)} | Attente Setup"
+        "Prix": "-", "Mon_Bag": smart_format(cash_available), "Conseil": "CAPITAL", "Action": "", "Score": 1000,
+        "Trend 1D": "-", "Pressure": "-", "Support Fibo": "-", "Analyse Complète 🧠": f"Prêt à tirer: {smart_format(cash_available)}"
     })
 
-    # Ligne 2 : État du Marché (Pour info)
-    market_msg = "BTC Haussier 🐂" if btc_trend == "BULL" else "BTC Baissier 🐻"
-    alt_msg = "Alts Forts 🚀" if alt_season else "Alts Faibles 💤"
+    # Ligne 2 : Macro
+    market_icon = "🐻" if btc_trend == "BEAR" else "🐂"
+    fng_icon = "😱" if fng_val < 30 else ("🤑" if fng_val > 70 else "😐")
     results.append({
-        "Crypto": "🌍 MARCHÉ",
-        "Prix": "-",
-        "Mon_Bag": "-",
-        "Conseil": "INFO",
-        "Action": "",
-        "Score": 999,
-        "Trend 1D": btc_trend,
-        "Trend 4H": "-",
-        "RSI": "-",
-        "Analyse Complète 🧠": f"{market_msg} | {alt_msg}"
+        "Crypto": "🌍 MACRO",
+        "Prix": "-", "Mon_Bag": "-", "Conseil": "INFO", "Action": "", "Score": 999,
+        "Trend 1D": btc_trend, "Pressure": "-", "Support Fibo": "-", 
+        "Analyse Complète 🧠": f"BTC {market_icon} | Sentiment: {fng_class} {fng_val}/100 {fng_icon}"
     })
 
     for symbol in WATCHLIST:
         try:
             live_price = get_live_price(symbol)
             if live_price is None: continue
-
             inds = calculate_advanced_indicators(symbol)
             if inds is None: continue
 
-            # --- CALCUL SL / TP ---
+            # SL / TP
             stop_loss = live_price - (2.0 * inds["atr_1h"])
             take_profit = live_price + (3.0 * inds["atr_1h"])
             
-            # --- SCORING V12 (Triple Confirmation) ---
+            # --- SCORING V13 ---
             score = 0
             details = []
             
-            # 1. Long Terme (1D) : Au dessus de MA200 ?
+            # 1. Trend 1D
             trend_1d = "🔴"
             if live_price > inds["ema200_1d"]:
                 trend_1d = "🟢"
                 score += 30
-                details.append("Fond Haussier")
-            else:
-                details.append("Fond Baissier")
-
-            # 2. Moyen Terme (4H) : Au dessus de MA50 ?
-            trend_4h = "🔴"
-            if live_price > inds["ema50_4h"]:
-                trend_4h = "🟢"
-                score += 20
             
-            # 3. Court Terme (RSI 1H)
-            if 45 < inds["rsi_1h"] < 65: 
-                score += 10
-            elif inds["rsi_1h"] < 30: 
-                score += 5; details.append("Rebond possible")
-            elif inds["rsi_1h"] > 70:
-                details.append("Surchauffe")
+            # 2. Pressure (Carnet d'ordres) - Nouveau !
+            pressure_str = "Neutral"
+            if inds["ob_ratio"] > 1.5: 
+                score += 20
+                pressure_str = "🟢 BUY WALL"
+                details.append(f"Pression Achat ({round(inds['ob_ratio'],1)}x)")
+            elif inds["ob_ratio"] < 0.6:
+                pressure_str = "🔴 SELL WALL"
+                details.append("Mur de Vente")
                 
-            # 4. Force & Volume
-            if inds["adx_1h"] > 25: 
-                score += 15
-                details.append("Trend Fort")
+            # 3. RSI & ADX
+            if 45 < inds["rsi_1h"] < 65: score += 10
+            elif inds["rsi_1h"] < 30: score += 5; details.append("Survente")
+            if inds["adx_1h"] > 25: score += 15
             
-            if inds["vol_ratio"] > 1.5: 
+            # 4. Sentiment Contrarian
+            # Si Peur Extreme (FNG < 20) et Crypto en Survente = Opportunité
+            if fng_val < 25 and inds["rsi_1h"] < 30:
                 score += 20
-                details.append(f"Vol x{round(inds['vol_ratio'],1)}")
+                details.append("💎 Buy the Fear")
 
-            # --- FILTRES MACRO (Veto) ---
-            # Si BTC est Bear, on massacre le score des Alts
+            # Filtres
             if btc_trend == "BEAR" and "BTC" not in symbol:
                 score = max(0, score - 40)
-                details.append("Veto BTC Bear")
-            
-            # Si Alts faibles, on réduit un peu
-            if not alt_season and "BTC" not in symbol:
-                score -= 10
-                details.append("Dominance BTC")
+                details.append("BTC Bear")
 
             # --- CONSEIL ---
             amount_owned = my_positions.get(symbol, 0)
@@ -351,25 +348,25 @@ def analyze_market_and_portfolio():
             advice = "⚪ NEUTRE"
             action = ""
 
-            if value_owned > 10: # Mode Gestion
+            if value_owned > 10:
                 if trend_1d == "🔴" and score < 40:
                     advice = "🚨 VENDRE"
                     action = "URGENT"
                 elif score > 70: advice = "🟢 GARDER"
                 else: advice = "🟠 SURVEILLER"
-            else: # Mode Chasseur
+            else:
                 if btc_trend == "BEAR":
                     advice = "⛔ ATTENDRE"
-                elif score > 85 and inds["adx_1h"] > 25: # Il faut un score très haut maintenant
+                    # Si on attend, on affiche où on aimerait acheter
+                    if inds["fibo_support"] > 0:
+                        details.append(f"Cible: {smart_format(inds['fibo_support'])}")
+                elif score > 85:
                     advice = "🔥 ACHAT FORT"
-                    details.insert(0, "✅ Triple Confirm")
+                    details.insert(0, "✅ Sniper")
                 elif score > 65:
                     advice = "✅ ACHAT"
 
-            # --- HISTORIQUE & ALERTE ---
-            check_history_and_alert(
-                symbol.replace("/USDC", ""), action, advice, live_price, " | ".join(details)
-            )
+            check_history_and_alert(symbol.replace("/USDC", ""), action, advice, live_price, " | ".join(details))
 
             results.append({
                 "Crypto": symbol.replace("/USDC", ""),
@@ -381,15 +378,14 @@ def analyze_market_and_portfolio():
                 "Take_Profit ($)": smart_format(take_profit),
                 "Score": score,
                 "Trend 1D": trend_1d,
-                "Trend 4H": trend_4h, # Nouvelle colonne
-                "RSI": round(inds["rsi_1h"], 1),
+                "Pressure": pressure_str, # Nouvelle colonne
+                "Support Fibo": smart_format(inds["fibo_support"]), # Nouvelle colonne
                 "Analyse Complète 🧠": " | ".join(details)
             })
 
         except Exception as e:
             print(f"⚠️ Skip {symbol}: {e}")
 
-    # ECRITURE
     if results:
         try:
             sh = gc.open_by_key(SHEET_ID)
@@ -398,8 +394,6 @@ def analyze_market_and_portfolio():
             
             df = pd.DataFrame(results)
             df = df.sort_values(by=["Score"], ascending=False)
-            
-            # On met Trésorerie et Marché en haut
             df_top = df[df["Score"] >= 999]
             df_others = df[df["Score"] < 999]
             df_final = pd.concat([df_top, df_others])
@@ -409,19 +403,19 @@ def analyze_market_and_portfolio():
             
             cols = ["Crypto", "Prix", "Mon_Bag", "Conseil", "Action", 
                     "Stop_Loss ($)", "Take_Profit ($)", 
-                    "Score", "Trend 1D", "Trend 4H", "RSI", "Mise_à_jour", "Analyse Complète 🧠"]
+                    "Score", "Trend 1D", "Pressure", "Support Fibo", "Mise_à_jour", "Analyse Complète 🧠"]
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print("🚀 Sheet V12 mis à jour !", flush=True)
+            print("🚀 Sheet V13 mis à jour !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
 # ======================================================
-# 🔄 MAIN
+# 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V12...", flush=True)
+    print("⏳ Démarrage V13...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -436,7 +430,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V12 Hedge Fund Active"
+def index(): return "Bot V13 Institutional Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
