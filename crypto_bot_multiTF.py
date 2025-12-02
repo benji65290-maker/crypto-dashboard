@@ -20,7 +20,6 @@ app = Flask(__name__)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 
-TOTAL_CAPITAL = 10000 
 RISK_PER_TRADE_PCT = 0.01 
 UPDATE_FREQUENCY = 900  # 15 minutes
 
@@ -34,7 +33,7 @@ WATCHLIST = [
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation...", flush=True)
+print("🔐 Initialisation V10...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -62,20 +61,16 @@ except Exception as e:
     print(f"❌ Erreur Config Binance: {e}", flush=True)
 
 # ======================================================
-# 🛠️ OUTILS
+# 🛠️ OUTILS & CALCULS
 # ======================================================
 
 def smart_format(value, is_currency=True):
     if value is None: return "-"
     suffix = " $" if is_currency else ""
-    if value >= 1000:
-        return f"{value:,.2f}{suffix}".replace(",", " ")
-    elif value >= 1:
-        return f"{value:.2f}{suffix}"
-    elif value >= 0.001:
-        return f"{value:.4f}{suffix}"
-    else:
-        return f"{value:.8f}{suffix}"
+    if value >= 1000: return f"{value:,.2f}{suffix}".replace(",", " ")
+    elif value >= 1: return f"{value:.2f}{suffix}"
+    elif value >= 0.001: return f"{value:.4f}{suffix}"
+    else: return f"{value:.8f}{suffix}"
 
 def get_binance_data(symbol, timeframe, limit=100):
     try:
@@ -83,31 +78,57 @@ def get_binance_data(symbol, timeframe, limit=100):
         df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
         return df
-    except Exception:
-        return None
+    except: return None
 
 def get_live_price(symbol):
-    try:
-        return exchange.fetch_ticker(symbol)['last']
-    except:
-        return None
+    try: return exchange.fetch_ticker(symbol)['last']
+    except: return None
 
-def get_user_balance():
+def get_portfolio_data():
+    """
+    Récupère :
+    1. Les positions détaillées (ex: SOL: 2.1)
+    2. La valeur totale du portefeuille en USDT/USDC (Capital Réel)
+    """
     positions = {}
-    if not exchange: return positions
+    total_equity_usd = 0.0
+    
+    if not exchange: return positions, 10000 # Valeur par défaut si pas de co
+    
     try:
+        # On récupère les prix actuels pour valoriser le tout
+        tickers = exchange.fetch_tickers() 
         balance = exchange.fetch_balance()
+        
         for asset, amount in balance['total'].items():
             if amount > 0:
-                pair = f"{asset}/USDC"
-                positions[pair] = amount
-        return positions
+                # Calcul de la valeur en USD
+                price = 0
+                if asset in ["USDT", "USDC", "USD"]:
+                    price = 1.0
+                else:
+                    # On cherche la paire USDT ou USDC
+                    pair_usdt = f"{asset}/USDT"
+                    pair_usdc = f"{asset}/USDC"
+                    if pair_usdt in tickers:
+                        price = tickers[pair_usdt]['last']
+                    elif pair_usdc in tickers:
+                        price = tickers[pair_usdc]['last']
+                
+                val_usd = amount * price
+                if val_usd > 1: # On ignore les poussières < 1$
+                    total_equity_usd += val_usd
+                    # On stocke pour le matching avec la watchlist
+                    positions[f"{asset}/USDC"] = amount
+                    positions[f"{asset}/USDT"] = amount # Supporte les deux cas
+                    
+        return positions, total_equity_usd
     except Exception as e:
-        print(f"⚠️ Erreur Balance: {e}")
-        return {}
+        print(f"⚠️ Erreur Portfolio: {e}")
+        return {}, 10000
 
 # ======================================================
-# 🧠 INDICATEURS & ANALYSE
+# 🧠 COEUR DE L'ANALYSE
 # ======================================================
 
 def calculate_indicators(df_1h, df_1d):
@@ -127,8 +148,8 @@ def calculate_indicators(df_1h, df_1d):
     tr2 = abs(df_1h['high'] - df_1h['close'].shift(1))
     tr3 = abs(df_1h['low'] - df_1h['close'].shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
     atr = tr.rolling(14).mean()
+    
     plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
     minus_di = 100 * (abs(minus_dm).ewm(alpha=1/14).mean() / atr)
     dx = (abs(plus_di - minus_di) / abs(plus_di + minus_di)) * 100
@@ -149,11 +170,15 @@ def calculate_indicators(df_1h, df_1d):
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V9...", flush=True)
-    my_positions = get_user_balance()
+    print("🧠 Analyse V10...", flush=True)
+    
+    # 1. Récupération Capital Réel
+    my_positions, total_capital = get_portfolio_data()
+    print(f"💰 Capital Total Détecté: {smart_format(total_capital)}")
+    
     results = []
     
-    # Tendance BTC
+    # 2. Tendance BTC
     btc_df = get_binance_data("BTC/USDC", "1d", limit=200)
     market_trend = "NEUTRE"
     if btc_df is not None:
@@ -170,52 +195,57 @@ def analyze_market_and_portfolio():
 
             inds = calculate_indicators(df_1h, df_1d)
             
-            # --- CALCUL SL / TP (Stratégie ATR) ---
-            # Stop Loss = Prix - 2x ATR
-            # Take Profit = Prix + 3x ATR (Ratio 1.5)
+            # --- CALCUL SL / TP ---
             stop_loss = live_price - (2.0 * inds["atr"])
             take_profit = live_price + (3.0 * inds["atr"])
             
-            # --- INTELLIGENCE & SCORING ---
+            # --- INTELLIGENCE DÉTAILLÉE ---
             score = 0
-            reasons = [] 
+            details = [] 
 
-            # 1. Tendance Fond
+            # A. Structure de Fond (Trend)
             trend_fond = "🔴 BAISSE"
+            dist_ma200 = ((live_price - inds["ema200_1d"]) / inds["ema200_1d"]) * 100
             if live_price > inds["ema200_1d"]:
                 trend_fond = "🟢 HAUSSE"
                 score += 30
-                reasons.append("Fond Haussier")
+                details.append(f"Fond Haussier (+{round(dist_ma200,1)}% vs MA200)")
+            else:
+                details.append(f"Sous MA200 ({round(dist_ma200,1)}%)")
 
-            # 2. Court terme
-            if live_price > inds["ema50_1h"]:
-                score += 20
-            
-            # 3. RSI
-            if inds["rsi"] > 70:
-                reasons.append("⚠️ RSI Surchauffe")
-            elif inds["rsi"] < 30:
+            # B. Momentum (RSI)
+            rsi_val = inds["rsi"]
+            if rsi_val > 70:
+                details.append(f"⚠️ RSI Surchauffe ({round(rsi_val)})")
+            elif rsi_val < 30:
                 score += 10
-                reasons.append("🧊 RSI Survente")
-            elif 45 < inds["rsi"] < 65:
+                details.append(f"🧊 RSI Survente ({round(rsi_val)})")
+            elif 45 < rsi_val < 65:
                 score += 15
-                reasons.append("RSI Sain")
+                details.append(f"RSI Neutre ({round(rsi_val)})")
+            else:
+                details.append(f"RSI {round(rsi_val)}")
 
-            # 4. ADX (Force)
+            # C. Force (ADX)
             if inds["adx"] > 25:
                 score += 15
-            
-            # 5. Volume
+                details.append(f"Tendance Forte (ADX {round(inds['adx'])})")
+            else:
+                details.append("Marché mou (ADX<25)")
+
+            # D. Volume
             vol_ratio = inds["vol_cur"] / inds["vol_mean"] if inds["vol_mean"] > 0 else 0
             if vol_ratio > 1.5:
                 score += 20
-                reasons.append(f"Volume x{round(vol_ratio,1)}")
+                details.append(f"🔥 Gros Volume ({round(vol_ratio,1)}x)")
+            elif vol_ratio < 0.6:
+                details.append("Volume faible")
 
-            # Pénalité
+            # Pénalité BTC
             if market_trend == "BEAR" and "BTC" not in symbol:
                 score = max(0, score - 30)
 
-            # --- CONSEIL & TEXTE ---
+            # --- CONSEIL ---
             amount_owned = my_positions.get(symbol, 0)
             value_owned = amount_owned * live_price
             
@@ -226,35 +256,37 @@ def analyze_market_and_portfolio():
                 if trend_fond == "🔴 BAISSE" and score < 45:
                     advice = "🚨 VENDRE"
                     action = "URGENT"
-                    reasons.insert(0, "🛑 Stop Loss Touché (virtuel)")
+                    details.insert(0, "🛑 Invalidation Technique")
                 elif score > 70:
                     advice = "🟢 GARDER"
-                    reasons.insert(0, "✅ Profit Run")
+                    details.insert(0, "✅ Continuation probable")
                 else:
                     advice = "🟠 SURVEILLER"
             else:
                 if market_trend == "BEAR":
                     advice = "⛔ ATTENDRE"
+                    details.append("BTC Baissier")
                 elif score > 80 and inds["adx"] > 25:
                     advice = "🔥 ACHAT FORT"
-                    reasons.insert(0, "🎯 Sniper")
+                    details.insert(0, "🎯 Setup Sniper")
                 elif score > 60:
                     advice = "✅ ACHAT"
 
-            # --- CONSTRUCTION LIGNE ---
+            # --- OUTPUT ---
             results.append({
                 "Crypto": symbol.replace("/USDC", ""),
                 "Prix": smart_format(live_price),
                 "Mon_Bag": smart_format(value_owned) if value_owned > 10 else "-",
                 "Conseil": advice,
                 "Action": action,
-                # Nouvelles colonnes SL / TP
                 "Stop_Loss ($)": smart_format(stop_loss),
                 "Take_Profit ($)": smart_format(take_profit),
                 "Score": score,
                 "Trend": trend_fond,
                 "RSI": round(inds["rsi"], 1),
-                "Analyse 🧠": " + ".join(reasons) # Déplacé à la fin
+                # Colonnes techniques utiles pour la colonne Analyse
+                "ADX": round(inds["adx"], 1),
+                "Details": " | ".join(details) # Stockage temporaire
             })
 
         except Exception as e:
@@ -268,24 +300,23 @@ def analyze_market_and_portfolio():
             except: ws = sh.add_worksheet("PortfolioManager", 100, 20)
             
             df = pd.DataFrame(results)
-            # Tri intelligent
             df = df.sort_values(by=["Action", "Score"], ascending=[False, False])
             
-            # Réorganisation des colonnes pour mettre Analyse à la fin
-            cols = ["Crypto", "Prix", "Mon_Bag", "Conseil", "Action", 
-                    "Stop_Loss ($)", "Take_Profit ($)", 
-                    "Score", "Trend", "RSI", "Analyse 🧠"]
-            
-            # On s'assure d'avoir toutes les colonnes + Update
+            # Heure Paris
             paris_tz = pytz.timezone('Europe/Paris')
             df["Mise_à_jour"] = datetime.now(paris_tz).strftime("%H:%M")
             
-            # Sélection finale
-            final_df = df[cols + ["Mise_à_jour"]]
+            # Renommage final de la colonne Analyse
+            df = df.rename(columns={"Details": "Analyse Complète 🧠"})
+            
+            # Ordre des colonnes (Analyse à la fin)
+            cols = ["Crypto", "Prix", "Mon_Bag", "Conseil", "Action", 
+                    "Stop_Loss ($)", "Take_Profit ($)", 
+                    "Score", "Trend", "RSI", "Mise_à_jour", "Analyse Complète 🧠"]
             
             ws.clear()
-            set_with_dataframe(ws, final_df)
-            print("🚀 Sheet V9 mis à jour !", flush=True)
+            set_with_dataframe(ws, df[cols])
+            print("🚀 Sheet V10 mis à jour !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
@@ -293,7 +324,7 @@ def analyze_market_and_portfolio():
 # 🔄 BOUCLE
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V9...", flush=True)
+    print("⏳ Démarrage V10...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -308,7 +339,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V9 Strategy Active"
+def index(): return "Bot V10 Auto-Pilot Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
