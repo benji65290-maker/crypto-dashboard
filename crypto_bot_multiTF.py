@@ -21,8 +21,10 @@ app = Flask(__name__)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL") # Pour l'auto-ping
 
-UPDATE_FREQUENCY = 900  # 15 minutes
+# On force un update toutes les 15 minutes
+UPDATE_FREQUENCY = 900 
 
 WATCHLIST = [
     "BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC", "ADA/USDC", 
@@ -34,7 +36,7 @@ WATCHLIST = [
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V13 (Institutionnel)...", flush=True)
+print("🔐 Initialisation V13 (Fiabilité & Macro)...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -136,11 +138,10 @@ def get_portfolio_data():
         return {}, 0, 10000
 
 # ======================================================
-# 🌊 DATA INSTITUTIONNELLES (Sentiment & Order Book)
+# 🌊 DATA INSTITUTIONNELLES
 # ======================================================
 
 def get_fear_and_greed():
-    """Récupère l'indice de peur du marché (0-100)"""
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
         data = r.json()
@@ -151,44 +152,31 @@ def get_fear_and_greed():
         return 50, "Neutral"
 
 def get_order_book_pressure(symbol):
-    """
-    Analyse le carnet d'ordres pour voir qui domine (Acheteurs vs Vendeurs).
-    Retourne un ratio : > 1.0 = Pression Acheteuse, < 1.0 = Pression Vendeuse
-    """
     try:
-        # On regarde les 20 meilleurs ordres
         book = exchange.fetch_order_book(symbol, limit=20)
-        bid_vol = sum([bid[1] for bid in book['bids']]) # Volume Achat
-        ask_vol = sum([ask[1] for ask in book['asks']]) # Volume Vente
-        
+        bid_vol = sum([bid[1] for bid in book['bids']])
+        ask_vol = sum([ask[1] for ask in book['asks']])
         if ask_vol == 0: return 1.0
-        ratio = bid_vol / ask_vol
-        return ratio
+        return bid_vol / ask_vol
     except:
         return 1.0
 
 def get_fibonacci_support(df_1d):
-    """Calcule le prochain support majeur (Retracement Fibonacci)"""
     try:
-        # On prend le plus haut et plus bas des 3 derniers mois (approx 90j)
         recent_high = df_1d['high'].tail(90).max()
         recent_low = df_1d['low'].tail(90).min()
-        
-        # Niveaux Fibo standards
         diff = recent_high - recent_low
-        fib_0618 = recent_high - (diff * 0.618) # Le niveau "Golden Pocket"
+        fib_0618 = recent_high - (diff * 0.618)
         fib_0786 = recent_high - (diff * 0.786)
-        
         current_price = df_1d['close'].iloc[-1]
         
-        # On cherche le support juste en dessous du prix actuel
         if current_price > fib_0618: return fib_0618
         else: return fib_0786
     except:
         return 0
 
 # ======================================================
-# 📜 GESTION HISTORIQUE
+# 📜 HISTORIQUE
 # ======================================================
 def check_history_and_alert(symbol, new_action, new_advice, price, reason):
     try:
@@ -228,7 +216,7 @@ def check_history_and_alert(symbol, new_action, new_advice, price, reason):
 def calculate_advanced_indicators(symbol):
     df_1h = get_binance_data(symbol, "1h")
     df_4h = get_binance_data(symbol, "4h")
-    df_1d = get_binance_data(symbol, "1d", limit=200) # Besoin de plus d'historique pour Fibo
+    df_1d = get_binance_data(symbol, "1d", limit=200)
     
     if df_1h is None or df_4h is None or df_1d is None: return None
 
@@ -248,10 +236,8 @@ def calculate_advanced_indicators(symbol):
     ema50_4h = df_4h['close'].ewm(span=50).mean().iloc[-1]
     ema200_1d = df_1d['close'].ewm(span=200).mean().iloc[-1]
 
-    # Nouveau: Order Book Pressure
+    # Data Institutionnelles
     ob_ratio = get_order_book_pressure(symbol)
-    
-    # Nouveau: Fibo Support
     fibo_support = get_fibonacci_support(df_1d)
 
     return {
@@ -301,7 +287,6 @@ def analyze_market_and_portfolio():
             inds = calculate_advanced_indicators(symbol)
             if inds is None: continue
 
-            # SL / TP
             stop_loss = live_price - (2.0 * inds["atr_1h"])
             take_profit = live_price + (3.0 * inds["atr_1h"])
             
@@ -309,62 +294,44 @@ def analyze_market_and_portfolio():
             score = 0
             details = []
             
-            # 1. Trend 1D
+            # Trend 1D
             trend_1d = "🔴"
             if live_price > inds["ema200_1d"]:
                 trend_1d = "🟢"
                 score += 30
             
-            # 2. Pressure (Carnet d'ordres) - Nouveau !
+            # Pressure
             pressure_str = "Neutral"
             if inds["ob_ratio"] > 1.5: 
-                score += 20
-                pressure_str = "🟢 BUY WALL"
-                details.append(f"Pression Achat ({round(inds['ob_ratio'],1)}x)")
+                score += 20; pressure_str = "🟢 BUY WALL"; details.append(f"Pression Achat ({round(inds['ob_ratio'],1)}x)")
             elif inds["ob_ratio"] < 0.6:
-                pressure_str = "🔴 SELL WALL"
-                details.append("Mur de Vente")
+                pressure_str = "🔴 SELL WALL"; details.append("Mur de Vente")
                 
-            # 3. RSI & ADX
+            # RSI & ADX
             if 45 < inds["rsi_1h"] < 65: score += 10
             elif inds["rsi_1h"] < 30: score += 5; details.append("Survente")
             if inds["adx_1h"] > 25: score += 15
             
-            # 4. Sentiment Contrarian
-            # Si Peur Extreme (FNG < 20) et Crypto en Survente = Opportunité
-            if fng_val < 25 and inds["rsi_1h"] < 30:
-                score += 20
-                details.append("💎 Buy the Fear")
+            # Sentiment Contrarian
+            if fng_val < 25 and inds["rsi_1h"] < 30: score += 20; details.append("💎 Buy the Fear")
 
-            # Filtres
-            if btc_trend == "BEAR" and "BTC" not in symbol:
-                score = max(0, score - 40)
-                details.append("BTC Bear")
+            if btc_trend == "BEAR" and "BTC" not in symbol: score = max(0, score - 40); details.append("BTC Bear")
 
             # --- CONSEIL ---
             amount_owned = my_positions.get(symbol, 0)
             value_owned = amount_owned * live_price
-            
-            advice = "⚪ NEUTRE"
-            action = ""
+            advice = "⚪ NEUTRE"; action = ""
 
             if value_owned > 10:
-                if trend_1d == "🔴" and score < 40:
-                    advice = "🚨 VENDRE"
-                    action = "URGENT"
+                if trend_1d == "🔴" and score < 40: advice = "🚨 VENDRE"; action = "URGENT"
                 elif score > 70: advice = "🟢 GARDER"
                 else: advice = "🟠 SURVEILLER"
             else:
                 if btc_trend == "BEAR":
                     advice = "⛔ ATTENDRE"
-                    # Si on attend, on affiche où on aimerait acheter
-                    if inds["fibo_support"] > 0:
-                        details.append(f"Cible: {smart_format(inds['fibo_support'])}")
-                elif score > 85:
-                    advice = "🔥 ACHAT FORT"
-                    details.insert(0, "✅ Sniper")
-                elif score > 65:
-                    advice = "✅ ACHAT"
+                    if inds["fibo_support"] > 0: details.append(f"Cible Fibo: {smart_format(inds['fibo_support'])}")
+                elif score > 85: advice = "🔥 ACHAT FORT"; details.insert(0, "✅ Sniper")
+                elif score > 65: advice = "✅ ACHAT"
 
             check_history_and_alert(symbol.replace("/USDC", ""), action, advice, live_price, " | ".join(details))
 
@@ -378,8 +345,8 @@ def analyze_market_and_portfolio():
                 "Take_Profit ($)": smart_format(take_profit),
                 "Score": score,
                 "Trend 1D": trend_1d,
-                "Pressure": pressure_str, # Nouvelle colonne
-                "Support Fibo": smart_format(inds["fibo_support"]), # Nouvelle colonne
+                "Pressure": pressure_str,
+                "Support Fibo": smart_format(inds["fibo_support"]),
                 "Analyse Complète 🧠": " | ".join(details)
             })
 
@@ -407,12 +374,12 @@ def analyze_market_and_portfolio():
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print("🚀 Sheet V13 mis à jour !", flush=True)
+            print(f"🚀 Sheet V13 mis à jour à {df_final['Mise_à_jour'].iloc[0]}", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
 # ======================================================
-# 🔄 SERVEUR
+# 🔄 BOUCLE ROBUSTE (Keep-Alive)
 # ======================================================
 def run_bot():
     print("⏳ Démarrage V13...", flush=True)
@@ -422,15 +389,17 @@ def run_bot():
         analyze_market_and_portfolio()
 
 def keep_alive():
-    url = os.getenv("RENDER_EXTERNAL_URL")
+    url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(600)
-            try: requests.get(url)
+            time.sleep(300) # Ping toutes les 5 min
+            try: 
+                requests.get(url)
+                print("💤 Ping Keep-Alive sent", flush=True)
             except: pass
 
 @app.route("/")
-def index(): return "Bot V13 Institutional Active"
+def index(): return "Bot V13 Live"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
