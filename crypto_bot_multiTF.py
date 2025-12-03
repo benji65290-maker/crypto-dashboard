@@ -16,7 +16,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION (V21 PATCH)
+# ⚙️ CONFIGURATION V22 (ARCHITECTE)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -32,7 +32,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V21 (Robustesse)...", flush=True)
+print("🔐 Initialisation V22 (Architecte)...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -64,7 +64,7 @@ except Exception as e:
 # ======================================================
 
 def smart_format(value, is_currency=True, precision=2):
-    if value is None or str(value) == "nan": return "-"
+    if value is None: return "-"
     suffix = " $" if is_currency else ""
     try:
         val = float(value)
@@ -79,10 +79,10 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🛠️ Dashboard V21",
+                "title": "🏛️ Architecte V22",
                 "description": message,
                 "color": color_code,
-                "footer": {"text": "Debug & Fix Version"}
+                "footer": {"text": "Structure de Marché & Pivots"}
             }]
         }
         requests.post(DISCORD_WEBHOOK_URL, json=data)
@@ -102,12 +102,11 @@ def get_dynamic_watchlist(limit=25):
         return final_list
     except: return CORE_WATCHLIST
 
-def get_binance_data(symbol, timeframe, limit=500): # Augmenté à 500 pour stabilité
+def get_binance_data(symbol, timeframe, limit=500):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        # Conversion explicite en float pour éviter les erreurs de type
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
         return df
@@ -174,47 +173,45 @@ def append_history_log(symbol, price, full_signal, narrative):
     except: pass
 
 # ======================================================
-# 🧠 INDICATEURS TECHNIQUES (ROBUSTE)
+# 🧠 INDICATEURS TECHNIQUES & STRUCTURE
 # ======================================================
 def calculate_all_indicators(symbol):
     df_1h = get_binance_data(symbol, "1h", limit=500)
     df_1d = get_binance_data(symbol, "1d", limit=200)
     if df_1h is None or df_1d is None: return None
 
-    # RSI (avec gestion d'erreur)
+    # 1. PIVOT POINTS (Supports/Résistances J-1)
+    last_day = df_1d.iloc[-2] # La journée d'hier clôturée
+    high_d = last_day['high']
+    low_d = last_day['low']
+    close_d = last_day['close']
+    
+    pivot = (high_d + low_d + close_d) / 3
+    r1 = (2 * pivot) - low_d
+    s1 = (2 * pivot) - high_d
+    r2 = pivot + (high_d - low_d)
+    s2 = pivot - (high_d - low_d)
+
+    # RSI & ATR
     delta = df_1h['close'].diff()
     rs = delta.where(delta>0,0).rolling(14, min_periods=1).mean() / (-delta.where(delta<0,0)).rolling(14, min_periods=1).mean()
     rsi_1h = 100 - (100 / (1 + rs))
     
-    # ATR (Robustesse V21)
-    tr1 = df_1h['high'] - df_1h['low']
-    tr2 = abs(df_1h['high'] - df_1h['close'].shift(1))
-    tr3 = abs(df_1h['low'] - df_1h['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    # min_periods=1 force le calcul même si données partielles
+    tr = pd.concat([df_1h['high']-df_1h['low'], abs(df_1h['high']-df_1h['close'].shift(1)), abs(df_1h['low']-df_1h['close'].shift(1))], axis=1).max(axis=1)
     atr_1h = tr.rolling(14, min_periods=1).mean() 
 
     # ADX
-    plus_dm = df_1h['high'].diff()
-    minus_dm = df_1h['low'].diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    
-    # On évite la division par zéro avec replace
     atr_safe = atr_1h.replace(0, 1) 
-    
-    plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
-    minus_di = 100 * (abs(minus_dm).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
-    dx = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100)
-    adx_1h = dx.rolling(14, min_periods=1).mean()
+    plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
+    minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
+    adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14, min_periods=1).mean()
 
-    # MACD
+    # MACD & Bollinger
     exp1 = df_1h['close'].ewm(span=12, adjust=False, min_periods=1).mean()
     exp2 = df_1h['close'].ewm(span=26, adjust=False, min_periods=1).mean()
     macd = exp1 - exp2
     signal = macd.ewm(span=9, adjust=False, min_periods=1).mean()
 
-    # Bollinger
     sma20 = df_1h['close'].rolling(window=20, min_periods=1).mean()
     std = df_1h['close'].rolling(window=20, min_periods=1).std()
     bb_width = ((sma20 + 2*std) - (sma20 - 2*std)) / sma20
@@ -224,12 +221,9 @@ def calculate_all_indicators(symbol):
     ema50_1h = df_1h['close'].ewm(span=50, min_periods=1).mean().iloc[-1]
     ema200_1d = df_1d['close'].ewm(span=200, min_periods=1).mean().iloc[-1]
     current_price = df_1h['close'].iloc[-1]
-    
-    dist_ma200_pct = 0
-    if ema200_1d > 0:
-        dist_ma200_pct = ((current_price - ema200_1d) / ema200_1d) * 100
+    dist_ma200_pct = ((current_price - ema200_1d) / ema200_1d) * 100
 
-    # Order Book
+    # Order Book & Volume
     try:
         book = exchange.fetch_order_book(symbol, limit=20)
         bid = sum([b[1] for b in book['bids']])
@@ -237,7 +231,6 @@ def calculate_all_indicators(symbol):
         ob_ratio = bid / ask if ask > 0 else 1.0
     except: ob_ratio = 1.0
 
-    # Volume Ratio
     vol_mean = df_1h['volume'].rolling(20, min_periods=1).mean().iloc[-1]
     vol_cur = df_1h['volume'].iloc[-1]
     vol_ratio = vol_cur / vol_mean if vol_mean > 0 else 0
@@ -247,28 +240,24 @@ def calculate_all_indicators(symbol):
         "macd_line": macd.iloc[-1], "macd_signal": signal.iloc[-1],
         "bb_width": bb_width.iloc[-1],
         "ema50_1h": ema50_1h, "dist_ma200": dist_ma200_pct,
-        "ob_ratio": ob_ratio, "vol_ratio": vol_ratio
+        "ob_ratio": ob_ratio, "vol_ratio": vol_ratio,
+        "pivot_r1": r1, "pivot_r2": r2, "pivot_s1": s1
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V21 Robustesse...", flush=True)
+    print("🧠 Analyse V22 Architecte...", flush=True)
     my_positions, cash_available, total_capital = get_portfolio_data()
     dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(25)))
-    
     history_records = get_all_history()
     
     btc_df = get_binance_data("BTC/USDC", "1d", limit=200)
-    btc_trend = "NEUTRE"
-    if btc_df is not None:
-        ma200 = btc_df['close'].ewm(span=200, min_periods=1).mean().iloc[-1]
-        btc_trend = "BULL" if btc_df['close'].iloc[-1] > ma200 else "BEAR"
+    btc_trend = "BULL" if btc_df['close'].iloc[-1] > btc_df['close'].ewm(span=200, min_periods=1).mean().iloc[-1] else "BEAR"
     
     try: fng_val = int(requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()['data'][0]['value'])
     except: fng_val = 50
 
     results = []
     
-    # Header
     results.append({
         "Crypto": "💰 TRÉSORERIE", "Prix": "-", "Mon_Bag": smart_format(cash_available), 
         "Conseil": "CAPITAL", "Action": "", "Score": 1000, "Mise ($)": "-", "Frais Est.": "-",
@@ -288,56 +277,68 @@ def analyze_market_and_portfolio():
             inds = calculate_all_indicators(symbol)
             if inds is None: continue
 
-            # --- CORRECTION ATR & RISK (V21) ---
-            # Si ATR est nul ou NaN, on force une valeur par défaut (3% du prix)
-            atr_val = inds["atr"]
-            if pd.isna(atr_val) or atr_val <= 0:
-                atr_val = live_price * 0.03
-            
+            # --- CALCULS RISK ---
+            atr_val = inds["atr"] if pd.notna(inds["atr"]) and inds["atr"] > 0 else live_price * 0.03
             stop_loss_price = live_price - (2.0 * atr_val)
             risk_per_share = live_price - stop_loss_price
-            
-            # Sécurité supplémentaire
             if risk_per_share <= 0: risk_per_share = live_price * 0.01
 
-            risk_budget = total_capital * RISK_PER_TRADE_PCT 
+            # --- CIBLES INTELLIGENTES (V22) ---
+            # On définit le TP par rapport à la résistance pivot R1
+            # Si R1 est trop proche (< 1R), on vise R2
+            target_price = inds["pivot_r1"]
+            potential_gain = target_price - live_price
             
+            # Si le potentiel jusqu'à R1 est faible (inférieur au risque), on vise R2
+            target_type = "R1 (Pivot)"
+            if potential_gain < risk_per_share:
+                target_price = inds["pivot_r2"]
+                target_type = "R2 (Pivot)"
+                potential_gain = target_price - live_price
+
+            # Si R1 est en dessous du prix actuel (on l'a déjà pété), on vise R2
+            if target_price < live_price:
+                target_price = inds["pivot_r2"]
+                target_type = "R2 (Pivot)"
+            
+            # Calcul du VRAI Risk:Reward
+            real_rr = round(potential_gain / risk_per_share, 2) if risk_per_share > 0 else 0
+
+            # --- TAILLE POSITION ---
+            risk_budget = total_capital * RISK_PER_TRADE_PCT 
             pos_size_usd = 0
             forced_msg = ""
             if risk_per_share > 0:
                 pos_size_usd = (risk_budget / risk_per_share) * live_price
-            
             if pos_size_usd > 0:
-                if pos_size_usd < MIN_ORDER_SIZE_USD:
-                    pos_size_usd = MIN_ORDER_SIZE_USD; forced_msg = " (Min)"
+                if pos_size_usd < MIN_ORDER_SIZE_USD: pos_size_usd = MIN_ORDER_SIZE_USD; forced_msg = " (Min)"
                 if pos_size_usd > cash_available: pos_size_usd = cash_available
-            
             fees_est = pos_size_usd * 0.001
-            tp1 = live_price + (risk_per_share * 2.0)
-            
-            # SCORING
+
+            # --- SCORING ---
             score = 0
             narrative = []
             
             trend_icon = "🔴"
-            if inds["dist_ma200"] > 0: score += 30; trend_icon = "🟢"; narrative.append(f"{trend_icon} Fond Haussier (+{round(inds['dist_ma200'],1)}%)")
+            if inds["dist_ma200"] > 0: score += 30; trend_icon = "🟢"; narrative.append(f"{trend_icon} Fond Haussier")
             else: narrative.append(f"{trend_icon} Sous MA200")
 
-            macd_status = "Bearish"
-            if inds["macd_line"] > inds["macd_signal"]: score += 10; macd_status = "Bullish"
+            if inds["macd_line"] > inds["macd_signal"]: score += 10
+            if 45 < inds["rsi"] < 65: score += 10
+            elif inds["rsi"] < 30: score += 5; narrative.append(f"Survente")
+            if inds["bb_width"] < 0.05: score += 10; narrative.append("Squeeze")
+            if inds["adx"] > 25: score += 15
+            if inds["ob_ratio"] > 1.5: score += 20; narrative.append("Buy Wall")
+            elif inds["ob_ratio"] < 0.6: score -= 20; narrative.append("Sell Wall")
+            if inds["vol_ratio"] > 1.5: score += 10; narrative.append("Vol High")
 
-            if 45 < inds["rsi"] < 65: score += 10; narrative.append(f"RSI Sain (MACD {macd_status})")
-            elif inds["rsi"] < 30: score += 5; narrative.append(f"Survente (RSI {round(inds['rsi'])})")
-            elif inds["rsi"] > 70: narrative.append(f"Surchauffe (RSI {round(inds['rsi'])})")
-
-            if inds["bb_width"] < 0.05: score += 10; narrative.append("Squeeze Bollinger")
-
-            if inds["adx"] > 25: score += 15; narrative.append(f"Trend Fort")
-            
-            if inds["ob_ratio"] > 1.5: score += 20; narrative.append(f"Buy Wall ({round(inds['ob_ratio'],1)}x)")
-            elif inds["ob_ratio"] < 0.6: score -= 20; narrative.append(f"Sell Wall ({round(inds['ob_ratio'],1)}x)")
-
-            if inds["vol_ratio"] > 1.5: score += 10; narrative.append(f"Vol {round(inds['vol_ratio'],1)}x")
+            # --- SANCTION STRUCTURELLE (V22) ---
+            # Si le R:R réel (basé sur les pivots) est mauvais, on tue le score
+            if real_rr < 1.5:
+                score -= 30
+                narrative.append(f"⛔ Mur {target_type} trop proche (R:R {real_rr})")
+            else:
+                narrative.append(f"🎯 Cible {target_type} libre (R:R {real_rr})")
 
             if btc_trend == "BEAR" and "BTC" not in symbol: score = max(0, score - 40); narrative.append("BTC Bear")
 
@@ -367,14 +368,8 @@ def analyze_market_and_portfolio():
             
             if is_new:
                 append_history_log(symbol, live_price, full_signal, full_narrative)
-                msg = f"**{symbol}** : {full_signal}\n💰 Prix: {smart_format(live_price)}\n📦 Mise: {smart_format(pos_size_usd)}\n📝 {full_narrative}"
+                msg = f"**{symbol}** : {full_signal}\n💰 Prix: {smart_format(live_price)}\n🎯 Cible: {target_type} (R:R {real_rr})\n📝 {full_narrative}"
                 send_discord_alert(msg, 0x3498db)
-
-            # R:R Calculation (Corrigé V21)
-            reward = tp1 - live_price
-            rr_display = 0
-            if risk_per_share > 0:
-                rr_display = round(reward / risk_per_share, 2)
 
             results.append({
                 "Crypto": symbol.replace("/USDC", ""),
@@ -385,9 +380,9 @@ def analyze_market_and_portfolio():
                 "Mise ($)": f"{smart_format(pos_size_usd)}{forced_msg}" if "ACHAT" in advice else "-",
                 "Frais Est.": f"{smart_format(fees_est)}" if "ACHAT" in advice else "-",
                 "Stop Loss": smart_format(stop_loss_price),
-                "TP1": smart_format(tp1),
+                "TP (Struct)": smart_format(target_price), # Target Pivot
                 "Score": score,
-                "R:R": rr_display,
+                "R:R": real_rr,
                 "RSI": round(inds["rsi"], 1),
                 "ADX": round(inds["adx"], 1),
                 "Vol Ratio": round(inds["vol_ratio"], 1),
@@ -413,13 +408,13 @@ def analyze_market_and_portfolio():
             df_final["Update"] = datetime.now(paris_tz).strftime("%H:%M")
             
             cols = ["Crypto", "Prix", "Mon_Bag", "Conseil", "Action", 
-                    "Mise ($)", "Frais Est.", "Stop Loss", "TP1", "Score", "R:R",
+                    "Mise ($)", "Frais Est.", "Stop Loss", "TP (Struct)", "Score", "R:R",
                     "RSI", "ADX", "Vol Ratio", "Dist MA200%", "OrderBook", 
                     "Update", "Analyse Complète 🧠"]
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print("🚀 Sheet V21 Robustesse mis à jour !", flush=True)
+            print("🚀 Sheet V22 Architecte mis à jour !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
@@ -427,7 +422,7 @@ def analyze_market_and_portfolio():
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V21...", flush=True)
+    print("⏳ Démarrage V22...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -442,7 +437,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V21 Robust Active"
+def index(): return "Bot V22 Architect Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
