@@ -16,7 +16,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION (V18)
+# ⚙️ CONFIGURATION (V18 FIX)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -172,7 +172,7 @@ def check_history_and_alert(symbol, new_action, new_advice, price, narrative, si
             now_str = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M")
             ws_hist.append_row([now_str, symbol, smart_format(price), full_signal, narrative])
             
-            # Message Discord V18 (Formaté en Bloc)
+            # Message Discord V18
             msg = f"**{symbol}** : {full_signal}\n"
             msg += f"💰 Prix: {smart_format(price)}\n"
             if "ACHAT" in new_advice:
@@ -216,7 +216,9 @@ def calculate_all_indicators(symbol):
     std = df_1h['close'].rolling(window=20).std()
     bb_upper = sma20 + (2 * std)
     bb_lower = sma20 - (2 * std)
+    # Protection division par zéro
     bb_width = (bb_upper - bb_lower) / sma20
+    bb_width = bb_width.fillna(0)
 
     # 5. Trends & Distances
     ema50_1h = df_1h['close'].ewm(span=50).mean().iloc[-1]
@@ -273,7 +275,7 @@ def analyze_market_and_portfolio():
             inds = calculate_all_indicators(symbol)
             if inds is None: continue
 
-            # --- OPTIMISATION MICRO-CAPITAL (Legacy V17) ---
+            # --- OPTIMISATION MICRO-CAPITAL ---
             stop_loss_price = live_price - (2.0 * inds["atr"])
             risk_per_share = live_price - stop_loss_price
             risk_budget = total_capital * RISK_PER_TRADE_PCT 
@@ -291,7 +293,7 @@ def analyze_market_and_portfolio():
             fees_est = pos_size_usd * 0.001
             tp1 = live_price + (risk_per_share * 2.0)
             
-            # --- SCORING & NARRATION (Nouveau V18) ---
+            # --- SCORING & NARRATION V18 ---
             score = 0
             narrative = [] # Liste de phrases
             
@@ -304,25 +306,23 @@ def analyze_market_and_portfolio():
                 narrative.append(f"{trend_icon} Tendance baissière (Sous MA200).")
 
             # 2. Momentum (RSI + MACD)
-            macd_status = ""
+            macd_status = "Bearish"
             if inds["macd_line"] > inds["macd_signal"]:
-                score += 10; macd_status = "MACD Bullish"
-            else:
-                macd_status = "MACD Bearish"
+                score += 10; macd_status = "Bullish"
 
             if 45 < inds["rsi"] < 65: 
                 score += 10
-                narrative.append(f"⚡ Momentum sain ({macd_status}).")
+                narrative.append(f"⚡ Momentum sain (MACD {macd_status}).")
             elif inds["rsi"] < 30: 
                 score += 5
-                narrative.append(f"🧊 Survente excessive (RSI {round(inds['rsi'])}), rebond possible ({macd_status}).")
+                narrative.append(f"🧊 Survente excessive (RSI {round(inds['rsi'])}), rebond possible.")
             elif inds["rsi"] > 70:
                 narrative.append(f"🔥 Surchauffe (RSI {round(inds['rsi'])}), risque de correction.")
 
             # 3. Volatilité (Bollinger)
             if inds["bb_width"] < 0.05: # Squeeze très serré
                 score += 10
-                narrative.append("💥 Volatilité compressée (Bollinger Squeeze), mouvement violent imminent.")
+                narrative.append("💥 Volatilité compressée (Bollinger Squeeze), mouvement imminent.")
 
             # 4. Force & Obstacles (ADX + OrderBook)
             if inds["adx"] > 25: 
@@ -401,7 +401,7 @@ def analyze_market_and_portfolio():
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
 # ======================================================
-# 🔄 MAIN
+# 🔄 SERVEUR (CORRIGÉ)
 # ======================================================
 def run_bot():
     print("⏳ Démarrage V18...", flush=True)
@@ -414,8 +414,12 @@ def keep_alive():
     url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(300); requests.get(url)
-            except: pass
+            time.sleep(300)
+            try: 
+                requests.get(url)
+                print("💤 Ping")
+            except: 
+                pass
 
 @app.route("/")
 def index(): return "Bot V18 Analyst Active"
