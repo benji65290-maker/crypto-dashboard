@@ -16,14 +16,15 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V25.1 (STRATÈGE PRÉCIS)
+# ⚙️ CONFIGURATION V26 (CAMELEON OPTIMISÉ)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-UPDATE_FREQUENCY = 900  # 15 minutes
+# Fréquence ajustée pour capter les ranges (10 min)
+UPDATE_FREQUENCY = 600  
 RISK_PER_TRADE_PCT = 0.02 
 MIN_ORDER_SIZE_USD = 11.0 
 
@@ -32,7 +33,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V25.1...", flush=True)
+print("🔐 Initialisation V26...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -71,7 +72,7 @@ def smart_format(value, is_currency=True, precision=2):
         if val >= 1000: return f"{val:,.{precision}f}{suffix}".replace(",", " ")
         elif val >= 1: return f"{val:.{precision}f}{suffix}"
         elif val >= 0.001: return f"{val:.4f}{suffix}"
-        else: return f"{val:.8f}{suffix}"
+        else: return f"{value:.8f}{suffix}"
     except: return "-"
 
 def send_discord_alert(message, color_code=0x3498db):
@@ -79,16 +80,16 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🛡️ Stratège V25.1",
+                "title": "🦎 Caméléon V26",
                 "description": message,
                 "color": color_code,
-                "footer": {"text": "Analyse Macro & Micro"}
+                "footer": {"text": "Adaptive Strategy: Trend & Range"}
             }]
         }
         requests.post(DISCORD_WEBHOOK_URL, json=data)
     except: pass
 
-def get_dynamic_watchlist(all_tickers, limit=20):
+def get_dynamic_watchlist(all_tickers, limit=25):
     try:
         pairs = []
         for symbol, data in all_tickers.items():
@@ -108,6 +109,43 @@ def get_binance_data(symbol, timeframe, limit=200):
             df[col] = df[col].astype(float)
         return df
     except: return None
+
+def get_live_price(symbol):
+    try: return float(exchange.fetch_ticker(symbol)['last'])
+    except: return None
+
+def get_portfolio_data():
+    positions = {}
+    cash_usd = 0.0
+    total_equity_usd = 0.0
+    
+    if not exchange: return positions, 0, 10000
+    
+    try:
+        tickers = exchange.fetch_tickers() 
+        balance = exchange.fetch_balance()
+        
+        usdt = float(balance['total'].get('USDT', 0))
+        usdc = float(balance['total'].get('USDC', 0))
+        cash_usd = usdt + usdc
+        
+        for asset, amount in balance['total'].items():
+            amount = float(amount)
+            if amount > 0 and asset not in ["USDT", "USDC"]:
+                price = 0
+                pair_usdc = f"{asset}/USDC"
+                if pair_usdc in tickers: 
+                    price = float(tickers[pair_usdc]['last'])
+                    val_usd = amount * price
+                    if val_usd > 1:
+                        total_equity_usd += val_usd
+                        positions[pair_usdc] = amount
+        
+        total_equity_usd += cash_usd
+        return positions, cash_usd, total_equity_usd
+    except Exception as e:
+        print(f"⚠️ Erreur Portfolio: {e}")
+        return {}, 0, 10000
 
 # ======================================================
 # 📜 HISTORIQUE
@@ -133,48 +171,49 @@ def append_history_log(symbol, price, full_signal, narrative):
     except: pass
 
 # ======================================================
-# 🧠 INDICATEURS COMPLETS
+# 🧠 INDICATEURS TECHNIQUES
 # ======================================================
 def calculate_all_indicators(symbol):
-    # Pause sécurité Anti-Ban
-    time.sleep(2.0)
+    time.sleep(1.0) # Pause Anti-Ban
     
-    df_1h = get_binance_data(symbol, "1h")
+    df_1h = get_binance_data(symbol, "1h", limit=500)
     if df_1h is None: return None
     
-    time.sleep(1.0)
-    df_1d = get_binance_data(symbol, "1d")
+    time.sleep(0.5)
+    df_1d = get_binance_data(symbol, "1d", limit=200)
     if df_1d is None: return None
 
     # RSI & ATR
     delta = df_1h['close'].diff()
-    rs = delta.where(delta>0,0).rolling(14).mean() / (-delta.where(delta<0,0)).rolling(14).mean()
+    rs = delta.where(delta>0,0).rolling(14, min_periods=1).mean() / (-delta.where(delta<0,0)).rolling(14, min_periods=1).mean()
     rsi_1h = 100 - (100 / (1 + rs))
     
     tr = pd.concat([df_1h['high']-df_1h['low'], abs(df_1h['high']-df_1h['close'].shift(1)), abs(df_1h['low']-df_1h['close'].shift(1))], axis=1).max(axis=1)
-    atr_1h = tr.rolling(14).mean() 
+    atr_1h = tr.rolling(14, min_periods=1).mean() 
 
     # ADX
     atr_safe = atr_1h.replace(0, 1) 
-    plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14).mean() / atr_safe)
-    minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14).mean() / atr_safe)
-    adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14).mean()
+    plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
+    minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
+    adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14, min_periods=1).mean()
 
     # MACD
-    exp1 = df_1h['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df_1h['close'].ewm(span=26, adjust=False).mean()
+    exp1 = df_1h['close'].ewm(span=12, adjust=False, min_periods=1).mean()
+    exp2 = df_1h['close'].ewm(span=26, adjust=False, min_periods=1).mean()
     macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
+    signal = macd.ewm(span=9, adjust=False, min_periods=1).mean()
 
     # Bollinger
-    sma20 = df_1h['close'].rolling(window=20).mean()
-    std = df_1h['close'].rolling(window=20).std()
+    sma20 = df_1h['close'].rolling(window=20, min_periods=1).mean()
+    std = df_1h['close'].rolling(window=20, min_periods=1).std()
+    bb_upper = sma20 + (2 * std)
+    bb_lower = sma20 - (2 * std)
     bb_width = ((sma20 + 2*std) - (sma20 - 2*std)) / sma20
     bb_width = bb_width.fillna(0)
 
     # Trends
-    ema50_1h = df_1h['close'].ewm(span=50).mean().iloc[-1]
-    ema200_1d = df_1d['close'].ewm(span=200).mean().iloc[-1]
+    ema50_1h = df_1h['close'].ewm(span=50, min_periods=1).mean().iloc[-1]
+    ema200_1d = df_1d['close'].ewm(span=200, min_periods=1).mean().iloc[-1]
     current_price = df_1h['close'].iloc[-1]
     dist_ma200_pct = ((current_price - ema200_1d) / ema200_1d) * 100
 
@@ -183,66 +222,52 @@ def calculate_all_indicators(symbol):
     high_d, low_d, close_d = last_day['high'], last_day['low'], last_day['close']
     pivot = (high_d + low_d + close_d) / 3
     r1, r2 = (2 * pivot) - low_d, pivot + (high_d - low_d)
+    s1, s2 = (2 * pivot) - high_d, pivot - (high_d - low_d)
 
-    # Volume Ratio
-    vol_mean = df_1h['volume'].rolling(20).mean().iloc[-1]
+    # Order Book & Volume
+    try:
+        book = exchange.fetch_order_book(symbol, limit=20)
+        bid = sum([b[1] for b in book['bids']])
+        ask = sum([a[1] for a in book['asks']])
+        ob_ratio = bid / ask if ask > 0 else 1.0
+    except: ob_ratio = 1.0
+
+    vol_mean = df_1h['volume'].rolling(20, min_periods=1).mean().iloc[-1]
     vol_cur = df_1h['volume'].iloc[-1]
     vol_ratio = vol_cur / vol_mean if vol_mean > 0 else 0
 
     return {
         "rsi": rsi_1h.iloc[-1], "adx": adx_1h.iloc[-1], "atr": atr_1h.iloc[-1],
         "macd_line": macd.iloc[-1], "macd_signal": signal.iloc[-1],
-        "bb_width": bb_width.iloc[-1],
+        "bb_width": bb_width.iloc[-1], "bb_lower": bb_lower.iloc[-1], "bb_upper": bb_upper.iloc[-1],
         "ema50_1h": ema50_1h, "dist_ma200": dist_ma200_pct,
-        "vol_ratio": vol_ratio,
-        "pivot_r1": r1, "pivot_r2": r2
+        "ob_ratio": ob_ratio, "vol_ratio": vol_ratio,
+        "pivot_r1": r1, "pivot_r2": r2, "pivot_s1": s1
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V25.1 Stratège...", flush=True)
+    print("🧠 Analyse V26 Caméléon...", flush=True)
     
-    # 1. Tickers Uniques
     try: all_tickers = exchange.fetch_tickers()
     except: return
 
-    # 2. Portefeuille & Cash
-    positions = {}
-    cash_usd = 0.0
-    total_equity_usd = 0.0
-    try:
-        balance = exchange.fetch_balance()
-        usdt = float(balance['total'].get('USDT', 0))
-        usdc = float(balance['total'].get('USDC', 0))
-        cash_usd = usdt + usdc
-        
-        for asset, amount in balance['total'].items():
-            amount = float(amount)
-            if amount > 0 and asset not in ["USDT", "USDC"]:
-                pair_usdc = f"{asset}/USDC"
-                if pair_usdc in all_tickers: 
-                    price = float(all_tickers[pair_usdc]['last'])
-                    val_usd = amount * price
-                    if val_usd > 1:
-                        total_equity_usd += val_usd
-                        positions[pair_usdc] = amount
-        total_equity_usd += cash_usd
-    except: pass
-
-    # 3. Watchlist & Historique
-    dynamic_list = list(set(CORE_WATCHLIST + list(positions.keys()) + get_dynamic_watchlist(all_tickers, 20)))
+    my_positions, cash_available, total_capital = get_portfolio_data()
+    dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(all_tickers, 25)))
     history_records = get_all_history()
     
-    # 4. Tendance BTC (Calcul Robuste)
+    # --- ANALYSE DE RÉGIME ---
+    market_regime = "RANGE" 
     btc_trend = "NEUTRE"
-    btc_ma200 = 0
+    
+    # On regarde si BTC est en tendance ou en range
     try:
-        # On fait un appel spécifique pour le BTC Daily car c'est critique
-        time.sleep(1.0)
-        btc_df = get_binance_data("BTC/USDC", "1d", limit=200)
-        if btc_df is not None:
-            btc_ma200 = btc_df['close'].ewm(span=200).mean().iloc[-1]
-            btc_price = btc_df['close'].iloc[-1]
-            btc_trend = "BULL" if btc_price > btc_ma200 else "BEAR"
+        btc_price = float(all_tickers["BTC/USDC"]["last"])
+        # On utilise une logique simplifiée pour le régime global sans ré-analyser tout le BTC en lourd
+        # Si le prix bouge de plus de 1% en 24h, on peut considérer qu'il y a du mouvement
+        change_24h = float(all_tickers["BTC/USDC"]["percentage"])
+        if abs(change_24h) > 2.0: market_regime = "TREND"
+        if change_24h > 0: btc_trend = "BULL"
+        elif change_24h < 0: btc_trend = "BEAR"
     except: pass
     
     try: fng_val = int(requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()['data'][0]['value'])
@@ -250,18 +275,17 @@ def analyze_market_and_portfolio():
 
     results = []
     
-    # Lignes Headers (Score artificiel pour le tri)
     results.append({
-        "Crypto": "💰 TRÉSORERIE", "Prix": "-", "Mon_Bag": smart_format(cash_usd), 
+        "Crypto": "💰 TRÉSORERIE", "Prix": "-", "Mon_Bag": smart_format(cash_available), 
         "Conseil": "CAPITAL", "Action": "", "Score": 2000, "Mise ($)": "-", "Frais Est.": "-",
-        "Analyse Complète 🧠": f"Capital prêt: {smart_format(cash_usd)}"
+        "Analyse Complète 🧠": f"Capital prêt: {smart_format(cash_available)}"
     })
     
-    macro_icon = "🐻" if btc_trend == "BEAR" else "🐂"
+    regime_icon = "🏎️" if market_regime == "TREND" else "🦀"
     results.append({
         "Crypto": "🌍 MACRO", "Prix": "-", "Mon_Bag": "-", 
         "Conseil": "INFO", "Action": "", "Score": 1999, "Mise ($)": "-", "Frais Est.": "-",
-        "Analyse Complète 🧠": f"BTC {btc_trend} {macro_icon} | Sentiment: {fng_val}/100"
+        "Analyse Complète 🧠": f"Mode: {market_regime} {regime_icon} | BTC {btc_trend} | Sentiment: {fng_val}"
     })
 
     for symbol in dynamic_list:
@@ -272,112 +296,105 @@ def analyze_market_and_portfolio():
             inds = calculate_all_indicators(symbol)
             if inds is None: continue
 
-            # --- ANALYSE DE FOND ---
+            # --- DÉCISION HYBRIDE V26 ---
             score = 0
             narrative = []
+            advice = "⚪ NEUTRE"
+            action = ""
             
-            # Trend
-            if inds["dist_ma200"] > 0: 
-                score += 30; narrative.append("🟢 Fond Haussier")
-            else: 
-                narrative.append("🔴 Fond Baissier")
-
-            # Momentum
-            macd_status = "Bearish"
-            if inds["macd_line"] > inds["macd_signal"]: 
-                score += 10; macd_status = "Bullish"
-            
-            if 45 < inds["rsi"] < 65: 
-                score += 10; narrative.append(f"RSI Sain (MACD {macd_status})")
-            elif inds["rsi"] < 30: 
-                score += 5; narrative.append(f"Survente (RSI {round(inds['rsi'])})")
-            elif inds["rsi"] > 70: 
-                narrative.append(f"Surchauffe (RSI {round(inds['rsi'])})")
-
-            # Volatilité
-            if inds["bb_width"] < 0.05: 
-                score += 10; narrative.append("⚡ Squeeze Bollinger")
-
-            # Force
-            if inds["adx"] > 25: 
-                score += 15; narrative.append(f"Trend Fort")
-            
-            # Volume
-            if inds["vol_ratio"] > 1.5: 
-                score += 10; narrative.append(f"Vol {round(inds['vol_ratio'],1)}x")
-
-            # Filtre Macro BTC
-            if btc_trend == "BEAR" and "BTC" not in symbol: 
-                score = max(0, score - 40)
-                narrative.append("⚠️ BTC Bear")
-
-            # --- DÉCISION CONSEIL ---
-            value_owned = positions.get(symbol, 0) * live_price
-            advice = "⚪ NEUTRE"; action = ""
-
-            # Stratégie si on possède
-            if value_owned > 10:
-                if inds["dist_ma200"] < 0 and score < 40: 
-                    advice = "🚨 VENDRE"; action = "URGENT"
-                elif score > 70: 
-                    advice = "🟢 GARDER"
-                else: 
-                    advice = "🟠 SURVEILLER"
-            
-            # Stratégie si on ne possède pas
-            else:
-                if btc_trend == "BEAR": 
-                    advice = "⛔ ATTENDRE"
-                elif score > 80 and inds["adx"] > 25: 
-                    advice = "🔥 ACHAT FORT"
-                elif score > 60: 
-                    advice = "✅ ACHAT"
-                else:
-                    advice = "⚪ NEUTRE" # Retour à la normale si pas de signal
-
-            # --- EXECUTION ---
+            # Paramètres Risk
             atr_val = inds["atr"] if pd.notna(inds["atr"]) and inds["atr"] > 0 else live_price * 0.03
-            stop_loss_trigger = live_price - (2.0 * atr_val)
-            stop_loss_limit = stop_loss_trigger * 0.995 
-            trailing = inds["ema50_1h"] if live_price > inds["ema50_1h"] else stop_loss_trigger
-
-            risk_per_share = live_price - stop_loss_trigger
-            if risk_per_share <= 0: risk_per_share = live_price * 0.01
-
-            target_price = inds["pivot_r1"]
-            if target_price < live_price: target_price = inds["pivot_r2"]
             
-            real_rr = round((target_price - live_price) / risk_per_share, 2) if risk_per_share > 0 else 0
+            # 1. MODE TREND
+            if market_regime == "TREND":
+                stop_loss = live_price - (2.0 * atr_val)
+                tp_target = inds["pivot_r2"] # On vise haut
+                
+                if inds["dist_ma200"] > 0: score += 30; narrative.append("Trend OK")
+                if inds["adx"] > 25: score += 20; narrative.append("Force OK")
+                if inds["vol_ratio"] > 1.5: score += 10; narrative.append("Volume OK")
+                
+                if btc_trend == "BEAR" and "BTC" not in symbol: 
+                    score = -50; narrative.append("⛔ BTC Bear")
+                
+                if score > 50: advice = "✅ ACHAT (Trend)"
+
+            # 2. MODE RANGE (Le "Ping Pong")
+            else:
+                narrative.append("Mode Range")
+                # On achète le bas du range (Bollinger Low ou Pivot S1)
+                support_zone = max(inds["bb_lower"], inds["pivot_s1"])
+                dist_to_support = (live_price - support_zone) / live_price
+                
+                # Si on est proche du support (< 1.5%)
+                if abs(dist_to_support) < 0.015:
+                    score += 40
+                    narrative.append("🟢 Support Zone")
+                    stop_loss = support_zone * 0.99 # SL très serré
+                    tp_target = inds["ema50_1h"] # TP prudent (milieu du terrain)
+                    
+                    if inds["rsi"] < 40: score += 20; narrative.append("RSI Bas")
+                    if inds["ob_ratio"] > 1.2: score += 10; narrative.append("Buy Wall")
+                    
+                    if score > 50: advice = "✅ ACHAT (Rebond)"
+                else:
+                    stop_loss = live_price - (2.0 * atr_val) # Défaut
+                    tp_target = inds["pivot_r1"]
+
+            # --- GESTION RISQUE COMMUN ---
+            risk_per_share = live_price - stop_loss
+            if risk_per_share <= 0: risk_per_share = live_price * 0.01
+            
+            # Si TP trop proche du prix (Range très serré), on annule
+            if tp_target <= live_price: tp_target = live_price + (risk_per_share * 2.0)
+            
+            real_rr = round((tp_target - live_price) / risk_per_share, 2)
 
             # Taille Position
             risk_budget = total_equity_usd * RISK_PER_TRADE_PCT 
             pos_size_usd = 0
             forced_msg = ""
-            if risk_per_share > 0:
-                pos_size_usd = (risk_budget / risk_per_share) * live_price
-            if pos_size_usd > 0:
-                if pos_size_usd < MIN_ORDER_SIZE_USD: pos_size_usd = MIN_ORDER_SIZE_USD; forced_msg = " (Min)"
-                if pos_size_usd > cash_usd: pos_size_usd = cash_usd
+            
+            if "ACHAT" in advice:
+                if real_rr < 1.5:
+                    advice = "⚪ NEUTRE"
+                    narrative.append(f"Annulé (R:R {real_rr} faible)")
+                else:
+                    pos_size_usd = (risk_budget / risk_per_share) * live_price
+                    if pos_size_usd < MIN_ORDER_SIZE_USD: pos_size_usd = MIN_ORDER_SIZE_USD; forced_msg = " (Min)"
+                    if pos_size_usd > cash_usd: pos_size_usd = cash_usd
+            
             fees_est = pos_size_usd * 0.001
 
-            # Construction Phrase Analyse
-            full_narrative = " | ".join(narrative)
-            
+            # --- SORTIE ---
+            value_owned = my_positions.get(symbol, 0) * live_price
+            if value_owned > 10:
+                if market_regime == "RANGE" and inds["rsi"] > 65:
+                    advice = "🚨 VENDRE"; action = "PROFIT"; narrative.append("Haut du Range")
+                elif inds["dist_ma200"] < -3 and score < 40:
+                    advice = "🚨 VENDRE"; action = "STOP"; narrative.append("Cassure Trend")
+                else:
+                    advice = "🟢 GARDER"
+
             # Alerting
+            full_narrative = " | ".join(narrative)
             last_signal = "AUCUN"
             relevant = [r for r in history_records if r.get("Crypto") == symbol]
             if relevant: last_signal = relevant[-1].get("Signal", "AUCUN")
             
             full_signal = f"{action} {advice}".strip()
             is_new = False
-            if action == "URGENT" and "URGENT" not in last_signal: is_new = True
-            elif "ACHAT" in advice and "ACHAT" not in last_signal: is_new = True
+            if (action != "" and action not in last_signal) or ("ACHAT" in advice and "ACHAT" not in last_signal):
+                is_new = True
             
             if is_new:
                 append_history_log(symbol, live_price, full_signal, full_narrative)
-                msg = f"**{symbol}** : {full_signal}\n💰 {smart_format(live_price)}\n🎯 SL: {smart_format(stop_loss_trigger)}\n📝 {full_narrative}"
+                msg = f"**{symbol}** : {full_signal}\n💰 {smart_format(live_price)}\n🎯 Mode: {market_regime}\n📝 {full_narrative}"
                 send_discord_alert(msg, 0x3498db)
 
+            # --- NOMS EXACTS BINANCE (V24.1) + V26 ---
+            stop_loss_limit = stop_loss * 0.995
+            
             results.append({
                 "Crypto": symbol.replace("/USDC", ""),
                 "Prix": smart_format(live_price),
@@ -386,17 +403,20 @@ def analyze_market_and_portfolio():
                 "Action": action,
                 "Mise ($)": f"{smart_format(pos_size_usd)}{forced_msg}" if "ACHAT" in advice else "-",
                 "Frais Est.": f"{smart_format(fees_est)}" if "ACHAT" in advice else "-",
-                "SL Déclenchement": smart_format(stop_loss_trigger), 
+                
+                "SL Déclenchement": smart_format(stop_loss), 
                 "SL Limite": smart_format(stop_loss_limit),         
-                "Trailing Stop": smart_format(trailing),
-                "TP (Cible)": smart_format(target_price),    
+                "Trailing Stop": smart_format(inds["ema50_1h"]),
+                "TP (Cible)": smart_format(tp_target),    
+                
                 "Score": score,
                 "R:R": real_rr,
                 "RSI": round(inds["rsi"], 1),
                 "ADX": round(inds["adx"], 1),
                 "Vol Ratio": round(inds["vol_ratio"], 1),
                 "Dist MA200%": round(inds["dist_ma200"], 1),
-                "Update": "", # Sera rempli après
+                "OrderBook": round(inds["ob_ratio"], 2),
+                "Update": "",
                 "Analyse Complète 🧠": full_narrative
             })
 
@@ -410,13 +430,8 @@ def analyze_market_and_portfolio():
             except: ws = sh.add_worksheet("PortfolioManager", 100, 20)
             
             df = pd.DataFrame(results)
-            # Tri intelligent : Score décroissant
             df = df.sort_values(by=["Score"], ascending=False)
-            
-            # On force les lignes Headers en haut
-            df_headers = df[df["Score"] >= 1999]
-            df_content = df[df["Score"] < 1999]
-            df_final = pd.concat([df_headers, df_content])
+            df_final = pd.concat([df[df["Score"] >= 1999], df[df["Score"] < 1999]])
             
             paris_tz = pytz.timezone('Europe/Paris')
             df_final["Update"] = datetime.now(paris_tz).strftime("%H:%M")
@@ -424,12 +439,12 @@ def analyze_market_and_portfolio():
             cols = ["Crypto", "Prix", "Mon_Bag", "Conseil", "Action", 
                     "Mise ($)", "Frais Est.", 
                     "SL Déclenchement", "SL Limite", "Trailing Stop", "TP (Cible)", 
-                    "Score", "R:R", "RSI", "ADX", "Vol Ratio", "Dist MA200%", 
+                    "Score", "R:R", "RSI", "ADX", "Vol Ratio", "Dist MA200%", "OrderBook",
                     "Update", "Analyse Complète 🧠"]
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print("🚀 Sheet V25.1 Stratège mis à jour !", flush=True)
+            print(f"🚀 Sheet V26 Caméléon mis à jour (Mode {market_regime}) !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
@@ -437,7 +452,7 @@ def analyze_market_and_portfolio():
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V25.1...", flush=True)
+    print("⏳ Démarrage V26...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -447,12 +462,11 @@ def keep_alive():
     url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(300)
-            try: requests.get(url); print("💤 Ping")
+            time.sleep(300); requests.get(url)
             except: pass
 
 @app.route("/")
-def index(): return "Bot V25.1 Active"
+def index(): return "Bot V26 Chameleon Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
