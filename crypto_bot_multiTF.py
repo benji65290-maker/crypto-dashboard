@@ -16,7 +16,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V24.1 (BINANCE NATIVE)
+# ⚙️ CONFIGURATION V24.2 (ROBUSTESSE)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -24,15 +24,15 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 UPDATE_FREQUENCY = 900  # 15 minutes
-RISK_PER_TRADE_PCT = 0.02 # 2% de risque par trade
-MIN_ORDER_SIZE_USD = 11.0 # Minimum pour passer l'ordre
+RISK_PER_TRADE_PCT = 0.02 
+MIN_ORDER_SIZE_USD = 11.0 
 
 CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V24.1...", flush=True)
+print("🔐 Initialisation V24.2...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -71,7 +71,7 @@ def smart_format(value, is_currency=True, precision=2):
         if val >= 1000: return f"{val:,.{precision}f}{suffix}".replace(",", " ")
         elif val >= 1: return f"{val:.{precision}f}{suffix}"
         elif val >= 0.001: return f"{val:.4f}{suffix}"
-        else: return f"{val:.8f}{suffix}"
+        else: return f"{value:.8f}{suffix}"
     except: return "-"
 
 def send_discord_alert(message, color_code=0x3498db):
@@ -79,7 +79,7 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "📱 V24.1 Execution",
+                "title": "🛡️ V24.2 Anti-Crash",
                 "description": message,
                 "color": color_code,
                 "footer": {"text": "SL Déclenchement & Limite"}
@@ -211,12 +211,6 @@ def calculate_all_indicators(symbol):
     current_price = df_1h['close'].iloc[-1]
     dist_ma200_pct = ((current_price - ema200_1d) / ema200_1d) * 100
 
-    # Pivot Points (Targets)
-    last_day = df_1d.iloc[-2]
-    high_d, low_d, close_d = last_day['high'], last_day['low'], last_day['close']
-    pivot = (high_d + low_d + close_d) / 3
-    r1, r2 = (2 * pivot) - low_d, pivot + (high_d - low_d)
-
     # Order Book & Volume
     try:
         book = exchange.fetch_order_book(symbol, limit=20)
@@ -234,18 +228,25 @@ def calculate_all_indicators(symbol):
         "macd_line": macd.iloc[-1], "macd_signal": signal.iloc[-1],
         "bb_width": bb_width.iloc[-1],
         "ema50_1h": ema50_1h, "dist_ma200": dist_ma200_pct,
-        "ob_ratio": ob_ratio, "vol_ratio": vol_ratio,
-        "pivot_r1": r1, "pivot_r2": r2
+        "ob_ratio": ob_ratio, "vol_ratio": vol_ratio
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V24.1 Execution...", flush=True)
+    print("🧠 Analyse V24.2 Execution...", flush=True)
     my_positions, cash_available, total_capital = get_portfolio_data()
     dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(25)))
     history_records = get_all_history()
     
+    # --- PROTECTION ANTI-CRASH BTC ---
+    btc_trend = "NEUTRE" # Valeur par défaut
     btc_df = get_binance_data("BTC/USDC", "1d", limit=200)
-    btc_trend = "BULL" if btc_df['close'].iloc[-1] > btc_df['close'].ewm(span=200, min_periods=1).mean().iloc[-1] else "BEAR"
+    
+    if btc_df is not None and not btc_df.empty:
+        try:
+            ma200 = btc_df['close'].ewm(span=200, min_periods=1).mean().iloc[-1]
+            btc_trend = "BULL" if btc_df['close'].iloc[-1] > ma200 else "BEAR"
+        except:
+            print("⚠️ Erreur calcul tendance BTC")
     
     try: fng_val = int(requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()['data'][0]['value'])
     except: fng_val = 50
@@ -271,24 +272,23 @@ def analyze_market_and_portfolio():
             inds = calculate_all_indicators(symbol)
             if inds is None: continue
 
-            # --- CALCULS EXECUTION (Les Noms Exacts Binance) ---
+            # --- CALCULS EXECUTION ---
             atr_val = inds["atr"] if pd.notna(inds["atr"]) and inds["atr"] > 0 else live_price * 0.03
             
-            # 1. SL Déclenchement (Case "Stop")
-            sl_trigger = live_price - (2.0 * atr_val)
+            # 1. SL Trigger
+            stop_loss_trigger = live_price - (2.0 * atr_val)
             
-            # 2. SL Limite (Case "Limite" - Marge 0.5%)
-            sl_limit = sl_trigger * 0.995 
+            # 2. SL Limit (0.5% margin)
+            stop_loss_limit = stop_loss_trigger * 0.995 
             
-            # 3. Trailing Stop (Pour info)
-            trailing = inds["ema50_1h"] if live_price > inds["ema50_1h"] else sl_trigger
+            # 3. Trailing
+            trailing = inds["ema50_1h"] if live_price > inds["ema50_1h"] else stop_loss_trigger
 
-            risk_per_share = live_price - sl_trigger
+            risk_per_share = live_price - stop_loss_trigger
             if risk_per_share <= 0: risk_per_share = live_price * 0.01
 
-            # 4. TP Cible (Pivot)
-            target_price = inds["pivot_r1"]
-            if target_price < live_price: target_price = inds["pivot_r2"]
+            # 4. TP Cible (Risk Reward 2.0 par défaut pour simplification V24)
+            target_price = live_price + (risk_per_share * 2.0)
             
             # R:R
             real_rr = round((target_price - live_price) / risk_per_share, 2) if risk_per_share > 0 else 0
@@ -352,7 +352,7 @@ def analyze_market_and_portfolio():
             
             if is_new:
                 append_history_log(symbol, live_price, full_signal, full_narrative)
-                msg = f"**{symbol}** : {full_signal}\n💰 {smart_format(live_price)}\n🎯 SL Déclench: {smart_format(sl_trigger)}\n📝 {full_narrative}"
+                msg = f"**{symbol}** : {full_signal}\n💰 {smart_format(live_price)}\n🎯 SL Déclench: {smart_format(stop_loss_trigger)}\n📝 {full_narrative}"
                 send_discord_alert(msg, 0x3498db)
 
             results.append({
@@ -364,11 +364,10 @@ def analyze_market_and_portfolio():
                 "Mise ($)": f"{smart_format(pos_size_usd)}{forced_msg}" if "ACHAT" in advice else "-",
                 "Frais Est.": f"{smart_format(fees_est)}" if "ACHAT" in advice else "-",
                 
-                # --- NOMS EXACTS BINANCE ---
-                "SL Déclenchement": smart_format(sl_trigger), # Case "Stop"
-                "SL Limite": smart_format(sl_limit),         # Case "Limite"
+                "SL Déclenchement": smart_format(stop_loss_trigger), 
+                "SL Limite": smart_format(stop_loss_limit),         
                 "Trailing Stop": smart_format(trailing),
-                "TP (Cible)": smart_format(target_price),    # Case "Prix (Limit)"
+                "TP (Cible)": smart_format(target_price),    
                 
                 "Score": score,
                 "R:R": real_rr,
@@ -396,7 +395,6 @@ def analyze_market_and_portfolio():
             paris_tz = pytz.timezone('Europe/Paris')
             df_final["Update"] = datetime.now(paris_tz).strftime("%H:%M")
             
-            # ORDRE COLONNES FINAL
             cols = ["Crypto", "Prix", "Mon_Bag", "Conseil", "Action", 
                     "Mise ($)", "Frais Est.", 
                     "SL Déclenchement", "SL Limite", "Trailing Stop", "TP (Cible)", 
@@ -405,7 +403,7 @@ def analyze_market_and_portfolio():
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print("🚀 Sheet V24.1 Binance Native mis à jour !", flush=True)
+            print("🚀 Sheet V24.2 Anti-Crash mis à jour !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Sheet: {e}", flush=True)
 
@@ -413,7 +411,7 @@ def analyze_market_and_portfolio():
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V24.1...", flush=True)
+    print("⏳ Démarrage V24.2...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -428,7 +426,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V24.1 Binance Native Active"
+def index(): return "Bot V24.2 Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
