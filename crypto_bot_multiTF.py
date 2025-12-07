@@ -113,7 +113,7 @@ def get_live_price(symbol):
     try: return float(exchange.fetch_ticker(symbol)['last'])
     except: return None
 
-# --- FONCTION RESTAURÉE ---
+# --- FONCTION RESTAURÉE (Celle qui manquait) ---
 def get_portfolio_data():
     positions = {}
     cash_usd = 0.0
@@ -447,7 +447,8 @@ def keep_alive():
     url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(300); requests.get(url)
+            time.sleep(300)
+            try: requests.get(url) # Syntaxe corrigée
             except: pass
 
 @app.route("/")
