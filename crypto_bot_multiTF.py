@@ -17,7 +17,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V30 (ZERO TRUST SAFETY)
+# ⚙️ CONFIGURATION V30 (ZERO TRUST SAFETY FIX)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -33,7 +33,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V30 (Safety First)...", flush=True)
+print("🔐 Initialisation V30...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -70,7 +70,7 @@ def smart_format(value, is_currency=True, precision=2):
     suffix = " $" if is_currency else ""
     try:
         val = float(value)
-        if val == 0: return "-" # On masque les zéros purs
+        if val == 0: return "-"
         if val >= 1000: return f"{val:,.{precision}f}{suffix}".replace(",", " ")
         elif val >= 1: return f"{val:.{precision}f}{suffix}"
         elif val >= 0.001: return f"{val:.4f}{suffix}"
@@ -82,7 +82,7 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🛡️ Bot V30 Safety",
+                "title": "🛡️ Bot V30",
                 "description": message,
                 "color": color_code,
                 "footer": {"text": "Zero Trust Protocol"}
@@ -106,7 +106,7 @@ def get_dynamic_watchlist(all_tickers, limit=25):
 def get_binance_data(symbol, timeframe, limit=200):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if not ohlcv or len(ohlcv) < limit: return None # Vérif. intégrité données
+        if not ohlcv or len(ohlcv) < limit: return None
         
         df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
@@ -120,10 +120,6 @@ def get_live_price(symbol):
     except: return None
 
 def get_portfolio_data():
-    """
-    Retourne (positions, cash, total).
-    En cas d'erreur API, retourne 0 pour le cash (SÉCURITÉ).
-    """
     positions = {}
     
     if not exchange: return positions, 0, 10000
@@ -154,7 +150,6 @@ def get_portfolio_data():
 
     except Exception as e:
         print(f"❌ Erreur CRITIQUE Portfolio: {e}")
-        # SAFETY FIRST : Si on ne sait pas combien on a, on dit qu'on a 0 cash dispo
         return {}, 0, 0 
 
 # ======================================================
@@ -184,12 +179,11 @@ def append_history_log(symbol, price, full_signal, narrative):
 # 🧠 INDICATEURS TECHNIQUES
 # ======================================================
 def calculate_all_indicators(symbol):
-    time.sleep(1.2) # Anti-ban respectueux
+    time.sleep(1.2) 
     
     df_1h = get_binance_data(symbol, "1h")
-    if df_1h is None: return None # Données corrompues ou manquantes -> STOP
+    if df_1h is None: return None
     
-    # Vérification anti-division par zéro sur les prix
     if (df_1h['close'] == 0).any(): return None
 
     # RSI
@@ -201,11 +195,8 @@ def calculate_all_indicators(symbol):
     tr = pd.concat([df_1h['high']-df_1h['low'], abs(df_1h['high']-df_1h['close'].shift(1)), abs(df_1h['low']-df_1h['close'].shift(1))], axis=1).max(axis=1)
     atr_1h = tr.rolling(14).mean() 
     
-    # SI ATR est NaN ou 0, c'est DANGEREUX -> On retourne None pour invalider la crypto
-    if atr_1h.iloc[-1] <= 0 or pd.isna(atr_1h.iloc[-1]):
-        return None
+    if atr_1h.iloc[-1] <= 0 or pd.isna(atr_1h.iloc[-1]): return None
 
-    # ADX
     plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14).mean() / atr_1h)
     minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14).mean() / atr_1h)
     adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14).mean()
@@ -226,7 +217,7 @@ def calculate_all_indicators(symbol):
     # Trends
     time.sleep(0.5)
     df_1d = get_binance_data(symbol, "1d")
-    if df_1d is None: return None # Manque donnée Daily -> STOP
+    if df_1d is None: return None
     
     ema50_1h = df_1h['close'].ewm(span=50).mean().iloc[-1]
     ema200_1d = df_1d['close'].ewm(span=200).mean().iloc[-1]
@@ -243,7 +234,7 @@ def calculate_all_indicators(symbol):
     r1, r2 = (2 * pivot) - low_d, pivot + (high_d - low_d)
     s1, s2 = (2 * pivot) - high_d, pivot - (high_d - low_d)
 
-    # Order Book (Try/Except car non-critique, mais valeur par défaut NEUTRE)
+    # Order Book
     try:
         book = exchange.fetch_order_book(symbol, limit=20)
         bid = sum([b[1] for b in book['bids']])
@@ -274,7 +265,6 @@ def analyze_market_and_portfolio():
     except:
         print(f"❌ Erreur Tickers - Mode dégradé")
     
-    # Si get_portfolio_data échoue, cash_available sera 0 = SÉCURITÉ
     my_positions, cash_available, total_capital = get_portfolio_data()
     print(f"💰 Equity: {total_capital} $ | Cash Dispo: {cash_available} $")
 
@@ -298,13 +288,12 @@ def analyze_market_and_portfolio():
 
     results = []
     
-    # Headers
     results.append({
         "Crypto": "💰 TRÉSORERIE", "Prix": "-", "Mon_Bag": smart_format(cash_available), 
         "Conseil": "CAPITAL", "Action": "", "Score": 2000, "Mise ($)": "-", "Frais Est.": "-",
         "SL Déclenchement": "-", "SL Limite": "-", "Trailing Stop": "-", "TP (Cible)": "-",
         "R:R": "-", "RSI": "-", "ADX": "-", "Vol Ratio": "-", "Dist MA200%": "-",
-        "Analyse Complète 🧠": f"Cash sécurisé: {smart_format(cash_available)}"
+        "Analyse Complète 🧠": f"Capital prêt: {smart_format(cash_available)}"
     })
     results.append({
         "Crypto": "🌍 MACRO", "Prix": "-", "Mon_Bag": "-", 
@@ -328,22 +317,18 @@ def analyze_market_and_portfolio():
                 live_price = get_live_price(symbol)
                 
             if live_price is None or live_price == 0: 
-                # ERROR DATA -> On skip et on log
                 print(f"⚠️ PRIX MANQUANT pour {symbol}")
                 continue
             
             inds = calculate_all_indicators(symbol)
             
-            # --- SAFETY CHECK V30 ---
             if inds is None:
-                # Si indicateurs incomplets, on affiche une ligne d'erreur dans le tableau
-                # pour que l'utilisateur sache pourquoi c'est vide
                 results.append({
                     "Crypto": symbol.replace("/USDC", ""), "Prix": smart_format(live_price), "Mon_Bag": "-",
                     "Conseil": "⚠️ DATA ERROR", "Action": "", "Score": -9999, "Mise ($)": "-", "Frais Est.": "-",
                     "SL Déclenchement": "-", "SL Limite": "-", "Trailing Stop": "-", "TP (Cible)": "-",
                     "R:R": "-", "RSI": "-", "ADX": "-", "Vol Ratio": "-", "Dist MA200%": "-",
-                    "Update": "", "Analyse Complète 🧠": "Données techniques insuffisantes ou corrompues."
+                    "Update": "", "Analyse Complète 🧠": "Données techniques insuffisantes."
                 })
                 continue
 
@@ -353,7 +338,6 @@ def analyze_market_and_portfolio():
             advice = "⚪ NEUTRE"
             action = ""
             
-            # Ici ATR est garanti valide par calculate_all_indicators
             stop_loss = live_price - (2.0 * inds["atr"])
             tp_target = inds["pivot_r1"]
 
@@ -383,9 +367,7 @@ def analyze_market_and_portfolio():
                     stop_loss = live_price - (2.0 * inds["atr"])
                     tp_target = inds["pivot_r1"]
 
-            # Risk
             risk_per_share = live_price - stop_loss
-            # Safety Check Zero Div
             if risk_per_share <= 0: risk_per_share = live_price * 0.001 
             
             if tp_target <= live_price: tp_target = live_price + (risk_per_share * 2.0)
@@ -405,7 +387,6 @@ def analyze_market_and_portfolio():
             
             fees_est = pos_size_usd * 0.001
 
-            # Vente
             value_owned = my_positions.get(symbol, 0) * live_price
             if value_owned > 10:
                 if market_regime == "RANGE" and inds["rsi"] > 65:
@@ -499,7 +480,8 @@ def keep_alive():
     url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(300); requests.get(url)
+            time.sleep(300)
+            try: requests.get(url)
             except: pass
 
 @app.route("/")
