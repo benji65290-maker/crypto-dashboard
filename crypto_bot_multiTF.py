@@ -17,7 +17,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V28 (TIMEOUTS & PROGRESS)
+# ⚙️ CONFIGURATION V28.1 (FIX PORTÉE VARIABLE)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -33,7 +33,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V28...", flush=True)
+print("🔐 Initialisation V28.1...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -52,13 +52,10 @@ try:
             'apiKey': BINANCE_API_KEY,
             'secret': BINANCE_SECRET_KEY,
             'enableRateLimit': True,
-            'options': {
-                'defaultType': 'spot',
-                'adjustForTimeDifference': True
-            },
-            'timeout': 30000  # 🛑 Timeout ajouté : 30 secondes max
+            'options': {'defaultType': 'spot'},
+            'timeout': 30000 
         })
-        print("✅ Binance Client Configured (Timeout 30s)", flush=True)
+        print("✅ Binance Client Configured", flush=True)
     else:
         print("⚠️ Mode Simulation", flush=True)
 except Exception as e:
@@ -84,7 +81,7 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🦎 Bot V28",
+                "title": "🦎 Bot V28.1",
                 "description": message,
                 "color": color_code,
                 "footer": {"text": "Live Monitoring"}
@@ -127,21 +124,24 @@ def get_portfolio_data():
     if not exchange: return positions, 0, 10000
     
     try:
-        tickers = {}
-        try: tickers = exchange.fetch_tickers()
-        except: pass 
-
+        # On essaie de récupérer le solde même si les tickers échouent
         balance = exchange.fetch_balance()
         
         usdt = float(balance['total'].get('USDT', 0))
         usdc = float(balance['total'].get('USDC', 0))
         cash_usd = usdt + usdc
         
+        # On essaie d'estimer la valeur totale
+        tickers = {}
+        try: tickers = exchange.fetch_tickers()
+        except: pass
+
         for asset, amount in balance['total'].items():
             amount = float(amount)
             if amount > 0 and asset not in ["USDT", "USDC"]:
                 price = 0
                 pair_usdc = f"{asset}/USDC"
+                
                 if pair_usdc in tickers: 
                     price = float(tickers[pair_usdc]['last'])
                 
@@ -151,9 +151,12 @@ def get_portfolio_data():
                     positions[pair_usdc] = amount
         
         total_equity_usd += cash_usd
+        # Sécurité pour éviter 0
+        if total_equity_usd == 0: total_equity_usd = 10000 
+        
         return positions, cash_usd, total_equity_usd
     except Exception as e:
-        print(f"⚠️ Erreur Portfolio: {e}")
+        print(f"⚠️ Erreur Portfolio (Détail): {e}")
         return {}, 0, 10000
 
 # ======================================================
@@ -168,7 +171,8 @@ def get_all_history():
             ws_hist.append_row(["Date", "Crypto", "Prix", "Signal", "Analyse"])
             return []
         return ws_hist.get_all_records()
-    except: return []
+    except Exception as e:
+        return []
 
 def append_history_log(symbol, price, full_signal, narrative):
     try:
@@ -257,7 +261,7 @@ def calculate_all_indicators(symbol):
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V28 (Timeout 30s)...", flush=True)
+    print("🧠 Analyse V28.1 (Fix Variable)...", flush=True)
     
     all_tickers = {}
     try:
@@ -266,7 +270,10 @@ def analyze_market_and_portfolio():
     except Exception as e:
         print(f"❌ Erreur Tickers: {e}")
     
+    # 1. RECUPERATION DONNEES (SORTIE DE LA BOUCLE)
     my_positions, cash_available, total_capital = get_portfolio_data()
+    print(f"💰 Equity Total: {total_capital} $")
+
     dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(all_tickers, 25)))
     history_records = get_all_history()
     
@@ -287,9 +294,12 @@ def analyze_market_and_portfolio():
 
     results = []
     
+    # Headers Initialisés avec des valeurs par défaut pour les colonnes techniques
     results.append({
         "Crypto": "💰 TRÉSORERIE", "Prix": "-", "Mon_Bag": smart_format(cash_available), 
         "Conseil": "CAPITAL", "Action": "", "Score": 2000, "Mise ($)": "-", "Frais Est.": "-",
+        "SL Déclenchement": "-", "SL Limite": "-", "Trailing Stop": "-", "TP (Cible)": "-",
+        "R:R": "-", "RSI": "-", "ADX": "-", "Vol Ratio": "-", "Dist MA200%": "-",
         "Analyse Complète 🧠": f"Capital prêt: {smart_format(cash_available)}"
     })
     
@@ -297,6 +307,8 @@ def analyze_market_and_portfolio():
     results.append({
         "Crypto": "🌍 MACRO", "Prix": "-", "Mon_Bag": "-", 
         "Conseil": "INFO", "Action": "", "Score": 1999, "Mise ($)": "-", "Frais Est.": "-",
+        "SL Déclenchement": "-", "SL Limite": "-", "Trailing Stop": "-", "TP (Cible)": "-",
+        "R:R": "-", "RSI": "-", "ADX": "-", "Vol Ratio": "-", "Dist MA200%": "-",
         "Analyse Complète 🧠": f"Mode: {market_regime} {mode_icon} | BTC {btc_trend} | Sentiment: {fng_val}"
     })
 
@@ -305,7 +317,7 @@ def analyze_market_and_portfolio():
 
     for symbol in dynamic_list:
         count += 1
-        print(f"🔄 [{count}/{len(dynamic_list)}] Scan {symbol}...", flush=True) # LOG DE PROGRESSION
+        print(f"🔄 [{count}/{len(dynamic_list)}] Scan {symbol}...", flush=True)
         try:
             live_price = 0
             if all_tickers and symbol in all_tickers:
@@ -426,7 +438,6 @@ def analyze_market_and_portfolio():
             print(f"⚠️ Erreur {symbol}: {e}")
             pass
 
-    # ECRITURE FORCEE (Même si erreur partielle)
     if results:
         try:
             sh = gc.open_by_key(SHEET_ID)
@@ -448,7 +459,7 @@ def analyze_market_and_portfolio():
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print(f"🚀 Sheet V28 OK ({len(results)} cryptos) !", flush=True)
+            print(f"🚀 Sheet V28.1 OK ({len(results)} cryptos) !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Ecriture: {e}", flush=True)
 
@@ -456,7 +467,7 @@ def analyze_market_and_portfolio():
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V28...", flush=True)
+    print("⏳ Démarrage V28.1...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -471,7 +482,7 @@ def keep_alive():
             except: pass
 
 @app.route("/")
-def index(): return "Bot V28 Stable Active"
+def index(): return "Bot V28.1 Final Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
