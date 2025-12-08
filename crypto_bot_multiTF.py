@@ -8,7 +8,7 @@ import gspread
 import ccxt
 import pytz
 import requests
-import traceback 
+import traceback
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
@@ -17,7 +17,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V27.1 (FIX SYNTAXE)
+# ⚙️ CONFIGURATION V28 (TIMEOUTS & PROGRESS)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -33,7 +33,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V27.1...", flush=True)
+print("🔐 Initialisation V28...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -52,9 +52,13 @@ try:
             'apiKey': BINANCE_API_KEY,
             'secret': BINANCE_SECRET_KEY,
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
+            'options': {
+                'defaultType': 'spot',
+                'adjustForTimeDifference': True
+            },
+            'timeout': 30000  # 🛑 Timeout ajouté : 30 secondes max
         })
-        print("✅ Binance Client Configured", flush=True)
+        print("✅ Binance Client Configured (Timeout 30s)", flush=True)
     else:
         print("⚠️ Mode Simulation", flush=True)
 except Exception as e:
@@ -80,21 +84,18 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🦎 Bot V27.1",
+                "title": "🦎 Bot V28",
                 "description": message,
                 "color": color_code,
-                "footer": {"text": "Debug Mode Active"}
+                "footer": {"text": "Live Monitoring"}
             }]
         }
-        requests.post(DISCORD_WEBHOOK_URL, json=data)
-    except Exception as e:
-        print(f"⚠️ Erreur Discord: {e}")
+        requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=5)
+    except: pass
 
 def get_dynamic_watchlist(all_tickers, limit=25):
     try:
-        if not all_tickers:
-            return CORE_WATCHLIST
-            
+        if not all_tickers: return CORE_WATCHLIST
         pairs = []
         for symbol, data in all_tickers.items():
             if "/USDC" in symbol and "quoteVolume" in data:
@@ -102,9 +103,7 @@ def get_dynamic_watchlist(all_tickers, limit=25):
         pairs.sort(key=lambda x: x[1], reverse=True)
         top_pairs = [p[0] for p in pairs[:limit]]
         return list(set(CORE_WATCHLIST + top_pairs))
-    except Exception as e:
-        print(f"⚠️ Erreur Watchlist: {e}")
-        return CORE_WATCHLIST
+    except: return CORE_WATCHLIST
 
 def get_binance_data(symbol, timeframe, limit=200):
     try:
@@ -114,8 +113,7 @@ def get_binance_data(symbol, timeframe, limit=200):
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
         return df
-    except Exception as e:
-        return None
+    except: return None
 
 def get_live_price(symbol):
     try: return float(exchange.fetch_ticker(symbol)['last'])
@@ -144,7 +142,6 @@ def get_portfolio_data():
             if amount > 0 and asset not in ["USDT", "USDC"]:
                 price = 0
                 pair_usdc = f"{asset}/USDC"
-                
                 if pair_usdc in tickers: 
                     price = float(tickers[pair_usdc]['last'])
                 
@@ -171,9 +168,7 @@ def get_all_history():
             ws_hist.append_row(["Date", "Crypto", "Prix", "Signal", "Analyse"])
             return []
         return ws_hist.get_all_records()
-    except Exception as e:
-        print(f"⚠️ Erreur Lecture Historique: {e}")
-        return []
+    except: return []
 
 def append_history_log(symbol, price, full_signal, narrative):
     try:
@@ -182,14 +177,14 @@ def append_history_log(symbol, price, full_signal, narrative):
         paris_tz = pytz.timezone('Europe/Paris')
         now_str = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M")
         ws_hist.append_row([now_str, symbol, smart_format(price), full_signal, narrative])
-    except Exception as e:
-        print(f"⚠️ Erreur Ecriture Historique: {e}")
+    except: pass
 
 # ======================================================
 # 🧠 INDICATEURS TECHNIQUES
 # ======================================================
 def calculate_all_indicators(symbol):
-    time.sleep(1.5)
+    # Pause sécurité
+    time.sleep(1.2)
     
     df_1h = get_binance_data(symbol, "1h")
     if df_1h is None: return None
@@ -262,20 +257,20 @@ def calculate_all_indicators(symbol):
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V27.1 Debug...", flush=True)
+    print("🧠 Analyse V28 (Timeout 30s)...", flush=True)
     
     all_tickers = {}
     try:
         all_tickers = exchange.fetch_tickers()
-        print(f"✅ Tickers récupérés: {len(all_tickers)} paires")
+        print(f"✅ Tickers OK: {len(all_tickers)}")
     except Exception as e:
-        print(f"❌ ERREUR CRITIQUE BINANCE (Tickers): {e}", flush=True)
+        print(f"❌ Erreur Tickers: {e}")
     
     my_positions, cash_available, total_capital = get_portfolio_data()
     dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(all_tickers, 25)))
     history_records = get_all_history()
     
-    # --- ANALYSE DE RÉGIME ---
+    # --- MACRO ---
     market_regime = "RANGE" 
     btc_trend = "NEUTRE"
     
@@ -305,9 +300,12 @@ def analyze_market_and_portfolio():
         "Analyse Complète 🧠": f"Mode: {market_regime} {mode_icon} | BTC {btc_trend} | Sentiment: {fng_val}"
     })
 
-    print(f"👉 Scan de {len(dynamic_list)} cryptos en cours...", flush=True)
+    print(f"👉 Scan de {len(dynamic_list)} cryptos...", flush=True)
+    count = 0
 
     for symbol in dynamic_list:
+        count += 1
+        print(f"🔄 [{count}/{len(dynamic_list)}] Scan {symbol}...", flush=True) # LOG DE PROGRESSION
         try:
             live_price = 0
             if all_tickers and symbol in all_tickers:
@@ -397,7 +395,6 @@ def analyze_market_and_portfolio():
                 msg = f"**{symbol}** : {full_signal}\n💰 {smart_format(live_price)}\n🎯 Mode: {market_regime}\n📝 {full_narrative}"
                 send_discord_alert(msg, 0x3498db)
 
-            # Noms Exacts Binance V24
             stop_loss_limit = stop_loss * 0.995
             trailing = inds["ema50_1h"] if live_price > inds["ema50_1h"] else stop_loss
 
@@ -426,9 +423,10 @@ def analyze_market_and_portfolio():
             })
 
         except Exception as e:
-            print(f"⚠️ Erreur Analyse {symbol}: {e}")
+            print(f"⚠️ Erreur {symbol}: {e}")
             pass
 
+    # ECRITURE FORCEE (Même si erreur partielle)
     if results:
         try:
             sh = gc.open_by_key(SHEET_ID)
@@ -450,15 +448,15 @@ def analyze_market_and_portfolio():
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print(f"🚀 Sheet V27.1 Debug mis à jour !", flush=True)
+            print(f"🚀 Sheet V28 OK ({len(results)} cryptos) !", flush=True)
         except Exception as e:
-            print(f"❌ Erreur Ecriture Sheet: {e}", flush=True)
+            print(f"❌ Erreur Ecriture: {e}", flush=True)
 
 # ======================================================
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V27.1...", flush=True)
+    print("⏳ Démarrage V28...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -469,13 +467,11 @@ def keep_alive():
     if url:
         while True:
             time.sleep(300)
-            try:
-                requests.get(url)
-            except:
-                pass
+            try: requests.get(url)
+            except: pass
 
 @app.route("/")
-def index(): return "Bot V27.1 Debug Active"
+def index(): return "Bot V28 Stable Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
