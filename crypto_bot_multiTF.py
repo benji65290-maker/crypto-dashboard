@@ -8,6 +8,7 @@ import gspread
 import ccxt
 import pytz
 import requests
+import traceback # Ajout pour voir les détails d'erreur
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
@@ -16,7 +17,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V26.3 (FINAL FIX)
+# ⚙️ CONFIGURATION V27 (DEBUG & ROBUSTE)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -32,7 +33,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V26.3...", flush=True)
+print("🔐 Initialisation V27...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -79,17 +80,22 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🦎 Caméléon V26.3",
+                "title": "🦎 Bot V27",
                 "description": message,
                 "color": color_code,
-                "footer": {"text": "Adaptive Strategy: Trend & Range"}
+                "footer": {"text": "Debug Mode Active"}
             }]
         }
         requests.post(DISCORD_WEBHOOK_URL, json=data)
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Erreur Discord: {e}")
 
 def get_dynamic_watchlist(all_tickers, limit=25):
     try:
+        # Protection si all_tickers est vide
+        if not all_tickers:
+            return CORE_WATCHLIST
+            
         pairs = []
         for symbol, data in all_tickers.items():
             if "/USDC" in symbol and "quoteVolume" in data:
@@ -97,7 +103,9 @@ def get_dynamic_watchlist(all_tickers, limit=25):
         pairs.sort(key=lambda x: x[1], reverse=True)
         top_pairs = [p[0] for p in pairs[:limit]]
         return list(set(CORE_WATCHLIST + top_pairs))
-    except: return CORE_WATCHLIST
+    except Exception as e:
+        print(f"⚠️ Erreur Watchlist: {e}")
+        return CORE_WATCHLIST
 
 def get_binance_data(symbol, timeframe, limit=200):
     try:
@@ -107,13 +115,15 @@ def get_binance_data(symbol, timeframe, limit=200):
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
         return df
-    except: return None
+    except Exception as e:
+        # On log l'erreur pour comprendre pourquoi ça rate
+        # print(f"⚠️ Erreur Data {symbol}: {e}") 
+        return None
 
 def get_live_price(symbol):
     try: return float(exchange.fetch_ticker(symbol)['last'])
     except: return None
 
-# --- FONCTION RESTAURÉE (Celle qui manquait) ---
 def get_portfolio_data():
     positions = {}
     cash_usd = 0.0
@@ -122,7 +132,10 @@ def get_portfolio_data():
     if not exchange: return positions, 0, 10000
     
     try:
-        tickers = exchange.fetch_tickers() 
+        tickers = {}
+        try: tickers = exchange.fetch_tickers()
+        except: pass # Si fetch_tickers rate, on continue quand même
+
         balance = exchange.fetch_balance()
         
         usdt = float(balance['total'].get('USDT', 0))
@@ -136,15 +149,17 @@ def get_portfolio_data():
                 pair_usdc = f"{asset}/USDC"
                 if pair_usdc in tickers: 
                     price = float(tickers[pair_usdc]['last'])
-                    val_usd = amount * price
-                    if val_usd > 1:
-                        total_equity_usd += val_usd
-                        positions[pair_usdc] = amount
+                
+                val_usd = amount * price
+                if val_usd > 1:
+                    total_equity_usd += val_usd
+                    positions[pair_usdc] = amount
         
         total_equity_usd += cash_usd
         return positions, cash_usd, total_equity_usd
     except Exception as e:
         print(f"⚠️ Erreur Portfolio: {e}")
+        # On retourne des valeurs par défaut pour ne pas crasher
         return {}, 0, 10000
 
 # ======================================================
@@ -159,7 +174,9 @@ def get_all_history():
             ws_hist.append_row(["Date", "Crypto", "Prix", "Signal", "Analyse"])
             return []
         return ws_hist.get_all_records()
-    except: return []
+    except Exception as e:
+        print(f"⚠️ Erreur Lecture Historique: {e}")
+        return []
 
 def append_history_log(symbol, price, full_signal, narrative):
     try:
@@ -168,7 +185,8 @@ def append_history_log(symbol, price, full_signal, narrative):
         paris_tz = pytz.timezone('Europe/Paris')
         now_str = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M")
         ws_hist.append_row([now_str, symbol, smart_format(price), full_signal, narrative])
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Erreur Ecriture Historique: {e}")
 
 # ======================================================
 # 🧠 INDICATEURS TECHNIQUES
@@ -182,27 +200,27 @@ def calculate_all_indicators(symbol):
     
     # RSI
     delta = df_1h['close'].diff()
-    rs = delta.where(delta>0,0).rolling(14).mean() / (-delta.where(delta<0,0)).rolling(14).mean()
+    rs = delta.where(delta>0,0).rolling(14, min_periods=1).mean() / (-delta.where(delta<0,0)).rolling(14, min_periods=1).mean()
     rsi_1h = 100 - (100 / (1 + rs))
     
     # ATR & ADX
     tr = pd.concat([df_1h['high']-df_1h['low'], abs(df_1h['high']-df_1h['close'].shift(1)), abs(df_1h['low']-df_1h['close'].shift(1))], axis=1).max(axis=1)
-    atr_1h = tr.rolling(14).mean() 
+    atr_1h = tr.rolling(14, min_periods=1).mean() 
     atr_safe = atr_1h.replace(0, 1) 
     
-    plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14).mean() / atr_safe)
-    minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14).mean() / atr_safe)
-    adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14).mean()
+    plus_di = 100 * (df_1h['high'].diff().clip(lower=0).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
+    minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
+    adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14, min_periods=1).mean()
 
     # MACD
-    exp1 = df_1h['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df_1h['close'].ewm(span=26, adjust=False).mean()
+    exp1 = df_1h['close'].ewm(span=12, adjust=False, min_periods=1).mean()
+    exp2 = df_1h['close'].ewm(span=26, adjust=False, min_periods=1).mean()
     macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
+    signal = macd.ewm(span=9, adjust=False, min_periods=1).mean()
 
     # Bollinger
-    sma20 = df_1h['close'].rolling(window=20).mean()
-    std = df_1h['close'].rolling(window=20).std()
+    sma20 = df_1h['close'].rolling(window=20, min_periods=1).mean()
+    std = df_1h['close'].rolling(window=20, min_periods=1).std()
     bb_upper = sma20 + (2 * std)
     bb_lower = sma20 - (2 * std)
     bb_width = ((sma20 + 2*std) - (sma20 - 2*std)) / sma20
@@ -213,8 +231,8 @@ def calculate_all_indicators(symbol):
     df_1d = get_binance_data(symbol, "1d")
     if df_1d is None: return None
     
-    ema50_1h = df_1h['close'].ewm(span=50).mean().iloc[-1]
-    ema200_1d = df_1d['close'].ewm(span=200).mean().iloc[-1]
+    ema50_1h = df_1h['close'].ewm(span=50, min_periods=1).mean().iloc[-1]
+    ema200_1d = df_1d['close'].ewm(span=200, min_periods=1).mean().iloc[-1]
     current_price = df_1h['close'].iloc[-1]
     dist_ma200_pct = ((current_price - ema200_1d) / ema200_1d) * 100
 
@@ -234,7 +252,7 @@ def calculate_all_indicators(symbol):
     except: ob_ratio = 1.0
 
     # Volume Ratio
-    vol_mean = df_1h['volume'].rolling(20).mean().iloc[-1]
+    vol_mean = df_1h['volume'].rolling(20, min_periods=1).mean().iloc[-1]
     vol_cur = df_1h['volume'].iloc[-1]
     vol_ratio = vol_cur / vol_mean if vol_mean > 0 else 0
 
@@ -248,11 +266,17 @@ def calculate_all_indicators(symbol):
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V26.3 Caméléon...", flush=True)
+    print("🧠 Analyse V27 Debug...", flush=True)
     
-    try: all_tickers = exchange.fetch_tickers()
-    except: return
-
+    # 1. Tickers (Point Critique)
+    all_tickers = {}
+    try:
+        all_tickers = exchange.fetch_tickers()
+        print(f"✅ Tickers récupérés: {len(all_tickers)} paires")
+    except Exception as e:
+        print(f"❌ ERREUR CRITIQUE BINANCE (Tickers): {e}", flush=True)
+        # On continue avec une liste vide, le get_dynamic_watchlist utilisera CORE_WATCHLIST
+    
     my_positions, cash_available, total_capital = get_portfolio_data()
     dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(all_tickers, 25)))
     history_records = get_all_history()
@@ -262,11 +286,19 @@ def analyze_market_and_portfolio():
     btc_trend = "NEUTRE"
     
     try:
-        change_24h = float(all_tickers["BTC/USDC"]["percentage"])
-        if abs(change_24h) > 2.0: market_regime = "TREND"
-        if change_24h > 0: btc_trend = "BULL"
-        elif change_24h < 0: btc_trend = "BEAR"
-    except: pass
+        if all_tickers and "BTC/USDC" in all_tickers:
+            change_24h = float(all_tickers["BTC/USDC"]["percentage"])
+            if abs(change_24h) > 2.0: market_regime = "TREND"
+            if change_24h > 0: btc_trend = "BULL"
+            elif change_24h < 0: btc_trend = "BEAR"
+        else:
+            # Fallback si fetch_tickers a échoué
+            btc_data = get_binance_data("BTC/USDC", "1d", limit=2)
+            if btc_data is not None:
+                if btc_data['close'].iloc[-1] > btc_data['open'].iloc[-1]: btc_trend = "BULL"
+                else: btc_trend = "BEAR"
+    except Exception as e: 
+        print(f"⚠️ Erreur Régime BTC: {e}")
     
     try: fng_val = int(requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()['data'][0]['value'])
     except: fng_val = 50
@@ -287,10 +319,18 @@ def analyze_market_and_portfolio():
         "Analyse Complète 🧠": f"Mode: {market_regime} {mode_icon} | BTC {btc_trend} | Sentiment: {fng_val}"
     })
 
+    print(f"👉 Scan de {len(dynamic_list)} cryptos en cours...", flush=True)
+
     for symbol in dynamic_list:
         try:
-            live_price = float(all_tickers[symbol]['last']) if symbol in all_tickers else 0
-            if live_price == 0: continue
+            # Prix Live (avec Fallback)
+            live_price = 0
+            if all_tickers and symbol in all_tickers:
+                live_price = float(all_tickers[symbol]['last'])
+            else:
+                live_price = get_live_price(symbol)
+                
+            if live_price is None or live_price == 0: continue
             
             inds = calculate_all_indicators(symbol)
             if inds is None: continue
@@ -406,6 +446,7 @@ def analyze_market_and_portfolio():
             })
 
         except Exception as e:
+            print(f"⚠️ Erreur Crypto {symbol}: {e}")
             pass
 
     if results:
@@ -429,15 +470,15 @@ def analyze_market_and_portfolio():
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print(f"🚀 Sheet V26.3 Caméléon mis à jour (Mode {market_regime}) !", flush=True)
+            print(f"🚀 Sheet V27 Debug mis à jour (Mode {market_regime}) !", flush=True)
         except Exception as e:
-            print(f"❌ Erreur Sheet: {e}", flush=True)
+            print(f"❌ Erreur Ecriture Sheet: {e}", flush=True)
 
 # ======================================================
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V26.3...", flush=True)
+    print("⏳ Démarrage V27...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -447,12 +488,11 @@ def keep_alive():
     url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(300)
-            try: requests.get(url) # Syntaxe corrigée
+            time.sleep(300); requests.get(url)
             except: pass
 
 @app.route("/")
-def index(): return "Bot V26.3 Chameleon Active"
+def index(): return "Bot V27 Debug Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
