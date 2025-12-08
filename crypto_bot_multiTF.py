@@ -17,7 +17,7 @@ from flask import Flask
 app = Flask(__name__)
 
 # ======================================================
-# ⚙️ CONFIGURATION V28.1 (FIX PORTÉE VARIABLE)
+# ⚙️ CONFIGURATION V28.2 (FIX VARIABLE NAME)
 # ======================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -33,7 +33,7 @@ CORE_WATCHLIST = ["BTC/USDC", "ETH/USDC", "SOL/USDC", "BNB/USDC"]
 # ======================================================
 # 🔐 CONNEXIONS
 # ======================================================
-print("🔐 Initialisation V28.1...", flush=True)
+print("🔐 Initialisation V28.2...", flush=True)
 
 try:
     info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
@@ -81,7 +81,7 @@ def send_discord_alert(message, color_code=0x3498db):
     try:
         data = {
             "embeds": [{
-                "title": "🦎 Bot V28.1",
+                "title": "🦎 Bot V28.2",
                 "description": message,
                 "color": color_code,
                 "footer": {"text": "Live Monitoring"}
@@ -124,18 +124,16 @@ def get_portfolio_data():
     if not exchange: return positions, 0, 10000
     
     try:
-        # On essaie de récupérer le solde même si les tickers échouent
+        tickers = {}
+        try: tickers = exchange.fetch_tickers()
+        except: pass 
+
         balance = exchange.fetch_balance()
         
         usdt = float(balance['total'].get('USDT', 0))
         usdc = float(balance['total'].get('USDC', 0))
         cash_usd = usdt + usdc
         
-        # On essaie d'estimer la valeur totale
-        tickers = {}
-        try: tickers = exchange.fetch_tickers()
-        except: pass
-
         for asset, amount in balance['total'].items():
             amount = float(amount)
             if amount > 0 and asset not in ["USDT", "USDC"]:
@@ -151,7 +149,6 @@ def get_portfolio_data():
                     positions[pair_usdc] = amount
         
         total_equity_usd += cash_usd
-        # Sécurité pour éviter 0
         if total_equity_usd == 0: total_equity_usd = 10000 
         
         return positions, cash_usd, total_equity_usd
@@ -187,18 +184,15 @@ def append_history_log(symbol, price, full_signal, narrative):
 # 🧠 INDICATEURS TECHNIQUES
 # ======================================================
 def calculate_all_indicators(symbol):
-    # Pause sécurité
     time.sleep(1.2)
     
     df_1h = get_binance_data(symbol, "1h")
     if df_1h is None: return None
     
-    # RSI
     delta = df_1h['close'].diff()
     rs = delta.where(delta>0,0).rolling(14, min_periods=1).mean() / (-delta.where(delta<0,0)).rolling(14, min_periods=1).mean()
     rsi_1h = 100 - (100 / (1 + rs))
     
-    # ATR & ADX
     tr = pd.concat([df_1h['high']-df_1h['low'], abs(df_1h['high']-df_1h['close'].shift(1)), abs(df_1h['low']-df_1h['close'].shift(1))], axis=1).max(axis=1)
     atr_1h = tr.rolling(14, min_periods=1).mean() 
     atr_safe = atr_1h.replace(0, 1) 
@@ -207,13 +201,11 @@ def calculate_all_indicators(symbol):
     minus_di = 100 * (abs(df_1h['low'].diff().clip(upper=0)).ewm(alpha=1/14, min_periods=1).mean() / atr_safe)
     adx_1h = (abs(plus_di - minus_di) / abs(plus_di + minus_di) * 100).rolling(14, min_periods=1).mean()
 
-    # MACD
     exp1 = df_1h['close'].ewm(span=12, adjust=False, min_periods=1).mean()
     exp2 = df_1h['close'].ewm(span=26, adjust=False, min_periods=1).mean()
     macd = exp1 - exp2
     signal = macd.ewm(span=9, adjust=False, min_periods=1).mean()
 
-    # Bollinger
     sma20 = df_1h['close'].rolling(window=20, min_periods=1).mean()
     std = df_1h['close'].rolling(window=20, min_periods=1).std()
     bb_upper = sma20 + (2 * std)
@@ -221,7 +213,6 @@ def calculate_all_indicators(symbol):
     bb_width = ((sma20 + 2*std) - (sma20 - 2*std)) / sma20
     bb_width = bb_width.fillna(0)
 
-    # Trends
     time.sleep(0.5)
     df_1d = get_binance_data(symbol, "1d")
     if df_1d is None: return None
@@ -231,14 +222,12 @@ def calculate_all_indicators(symbol):
     current_price = df_1h['close'].iloc[-1]
     dist_ma200_pct = ((current_price - ema200_1d) / ema200_1d) * 100
 
-    # Pivot Points
     last_day = df_1d.iloc[-2]
     high_d, low_d, close_d = last_day['high'], last_day['low'], last_day['close']
     pivot = (high_d + low_d + close_d) / 3
     r1, r2 = (2 * pivot) - low_d, pivot + (high_d - low_d)
     s1, s2 = (2 * pivot) - high_d, pivot - (high_d - low_d)
 
-    # Order Book
     try:
         book = exchange.fetch_order_book(symbol, limit=20)
         bid = sum([b[1] for b in book['bids']])
@@ -246,7 +235,6 @@ def calculate_all_indicators(symbol):
         ob_ratio = bid / ask if ask > 0 else 1.0
     except: ob_ratio = 1.0
 
-    # Volume Ratio
     vol_mean = df_1h['volume'].rolling(20, min_periods=1).mean().iloc[-1]
     vol_cur = df_1h['volume'].iloc[-1]
     vol_ratio = vol_cur / vol_mean if vol_mean > 0 else 0
@@ -261,7 +249,7 @@ def calculate_all_indicators(symbol):
     }
 
 def analyze_market_and_portfolio():
-    print("🧠 Analyse V28.1 (Fix Variable)...", flush=True)
+    print("🧠 Analyse V28.2 (Fix Variable)...", flush=True)
     
     all_tickers = {}
     try:
@@ -270,14 +258,13 @@ def analyze_market_and_portfolio():
     except Exception as e:
         print(f"❌ Erreur Tickers: {e}")
     
-    # 1. RECUPERATION DONNEES (SORTIE DE LA BOUCLE)
+    # On récupère bien total_capital ici
     my_positions, cash_available, total_capital = get_portfolio_data()
     print(f"💰 Equity Total: {total_capital} $")
 
     dynamic_list = list(set(CORE_WATCHLIST + list(my_positions.keys()) + get_dynamic_watchlist(all_tickers, 25)))
     history_records = get_all_history()
     
-    # --- MACRO ---
     market_regime = "RANGE" 
     btc_trend = "NEUTRE"
     
@@ -294,7 +281,6 @@ def analyze_market_and_portfolio():
 
     results = []
     
-    # Headers Initialisés avec des valeurs par défaut pour les colonnes techniques
     results.append({
         "Crypto": "💰 TRÉSORERIE", "Prix": "-", "Mon_Bag": smart_format(cash_available), 
         "Conseil": "CAPITAL", "Action": "", "Score": 2000, "Mise ($)": "-", "Frais Est.": "-",
@@ -302,14 +288,12 @@ def analyze_market_and_portfolio():
         "R:R": "-", "RSI": "-", "ADX": "-", "Vol Ratio": "-", "Dist MA200%": "-",
         "Analyse Complète 🧠": f"Capital prêt: {smart_format(cash_available)}"
     })
-    
-    mode_icon = "🏎️" if market_regime == "TREND" else "🦀"
     results.append({
         "Crypto": "🌍 MACRO", "Prix": "-", "Mon_Bag": "-", 
         "Conseil": "INFO", "Action": "", "Score": 1999, "Mise ($)": "-", "Frais Est.": "-",
         "SL Déclenchement": "-", "SL Limite": "-", "Trailing Stop": "-", "TP (Cible)": "-",
         "R:R": "-", "RSI": "-", "ADX": "-", "Vol Ratio": "-", "Dist MA200%": "-",
-        "Analyse Complète 🧠": f"Mode: {market_regime} {mode_icon} | BTC {btc_trend} | Sentiment: {fng_val}"
+        "Analyse Complète 🧠": f"Mode: {market_regime} | BTC {btc_trend} | Sentiment: {fng_val}"
     })
 
     print(f"👉 Scan de {len(dynamic_list)} cryptos...", flush=True)
@@ -372,7 +356,8 @@ def analyze_market_and_portfolio():
 
             pos_size_usd = 0
             forced_msg = ""
-            risk_budget = total_equity_usd * RISK_PER_TRADE_PCT 
+            # ICI CORRECTION : On utilise bien total_capital
+            risk_budget = total_capital * RISK_PER_TRADE_PCT 
             
             if "ACHAT" in advice:
                 if real_rr < 1.5:
@@ -435,7 +420,7 @@ def analyze_market_and_portfolio():
             })
 
         except Exception as e:
-            print(f"⚠️ Erreur {symbol}: {e}")
+            print(f"⚠️ Erreur Analyse {symbol}: {e}")
             pass
 
     if results:
@@ -459,7 +444,7 @@ def analyze_market_and_portfolio():
             
             ws.clear()
             set_with_dataframe(ws, df_final[cols])
-            print(f"🚀 Sheet V28.1 OK ({len(results)} cryptos) !", flush=True)
+            print(f"🚀 Sheet V28.2 OK ({len(results)} cryptos) !", flush=True)
         except Exception as e:
             print(f"❌ Erreur Ecriture: {e}", flush=True)
 
@@ -467,7 +452,7 @@ def analyze_market_and_portfolio():
 # 🔄 SERVEUR
 # ======================================================
 def run_bot():
-    print("⏳ Démarrage V28.1...", flush=True)
+    print("⏳ Démarrage V28.2...", flush=True)
     analyze_market_and_portfolio()
     while True:
         time.sleep(UPDATE_FREQUENCY)
@@ -477,12 +462,11 @@ def keep_alive():
     url = RENDER_EXTERNAL_URL
     if url:
         while True:
-            time.sleep(300)
-            try: requests.get(url)
+            time.sleep(300); requests.get(url)
             except: pass
 
 @app.route("/")
-def index(): return "Bot V28.1 Final Active"
+def index(): return "Bot V28.2 Final Active"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
